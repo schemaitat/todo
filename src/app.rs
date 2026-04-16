@@ -38,10 +38,10 @@ pub struct App {
     pub note_index: usize,
     pub status: String,
     pub command_buffer: String,
-    pub search_buffer: String,
     pub input_buffer: String,
     pub input_target: Option<InputTarget>,
-    pub last_search: Option<String>,
+    pub filter: String,
+    pub filter_backup: String,
     pub note_buffer: String,
     pub editing_note_index: Option<usize>,
     pub should_quit: bool,
@@ -59,10 +59,10 @@ impl App {
             note_index: 0,
             status: String::from("welcome — :help for commands, :q to quit"),
             command_buffer: String::new(),
-            search_buffer: String::new(),
             input_buffer: String::new(),
             input_target: None,
-            last_search: None,
+            filter: String::new(),
+            filter_backup: String::new(),
             note_buffer: String::new(),
             editing_note_index: None,
             should_quit: false,
@@ -111,13 +111,22 @@ impl App {
             KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
                 self.should_quit = true;
             }
+            KeyCode::Esc => {
+                if !self.filter.is_empty() {
+                    self.filter.clear();
+                    self.snap_selection();
+                    self.status = String::from("filter cleared");
+                }
+            }
             KeyCode::Char(':') => {
                 self.mode = Mode::Command;
                 self.command_buffer.clear();
             }
             KeyCode::Char('/') => {
+                self.filter_backup = self.filter.clone();
+                self.filter.clear();
                 self.mode = Mode::Search;
-                self.search_buffer.clear();
+                self.snap_selection();
             }
             KeyCode::Char('h') | KeyCode::Left => self.focus = Pane::Todos,
             KeyCode::Char('l') | KeyCode::Right => self.focus = Pane::Notes,
@@ -125,19 +134,18 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
             KeyCode::Char('g') => {
                 if pending_g {
-                    self.set_index(0);
+                    if let Some(&first) = self.visible_indices(self.focus).first() {
+                        self.set_index(first);
+                    }
                 } else {
                     self.pending_g = true;
                 }
             }
             KeyCode::Char('G') => {
-                let len = self.current_len();
-                if len > 0 {
-                    self.set_index(len - 1);
+                if let Some(&last) = self.visible_indices(self.focus).last() {
+                    self.set_index(last);
                 }
             }
-            KeyCode::Char('n') => self.repeat_search(true),
-            KeyCode::Char('N') => self.repeat_search(false),
             KeyCode::Char('i') | KeyCode::Char('a') | KeyCode::Char('o') => {
                 self.start_input(match self.focus {
                     Pane::Todos => InputTarget::NewTodo,
@@ -215,22 +223,27 @@ impl App {
     fn handle_search(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc => {
+                self.filter = std::mem::take(&mut self.filter_backup);
+                self.snap_selection();
                 self.mode = Mode::Normal;
-                self.search_buffer.clear();
+                self.status = String::from("search cancelled");
             }
             KeyCode::Enter => {
-                let q = std::mem::take(&mut self.search_buffer);
+                self.filter_backup.clear();
                 self.mode = Mode::Normal;
-                if !q.is_empty() {
-                    self.last_search = Some(q.clone());
-                    self.jump_to_match(&q, true, true);
-                }
+                self.status = if self.filter.is_empty() {
+                    String::from("filter cleared")
+                } else {
+                    format!("filter: {}", self.filter)
+                };
             }
             KeyCode::Backspace => {
-                self.search_buffer.pop();
+                self.filter.pop();
+                self.snap_selection();
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.search_buffer.push(c);
+                self.filter.push(c);
+                self.snap_selection();
             }
             _ => {}
         }
@@ -345,9 +358,14 @@ impl App {
             }
             "delete" | "rm" => self.delete_current(),
             "toggle" => self.toggle_done(),
+            "clear" | "nofilter" | "noh" | "nohlsearch" => {
+                self.filter.clear();
+                self.snap_selection();
+                self.status = String::from("filter cleared");
+            }
             "help" | "h" => {
                 self.status = String::from(
-                    "keys: hjkl move/switch | i add | dd delete | x toggle | / search | : cmd | e edit note",
+                    "keys: hjkl move/switch | i add | dd delete | x toggle | / filter | : cmd | e edit note",
                 );
             }
             other => {
@@ -411,20 +429,16 @@ impl App {
             Pane::Todos => {
                 if self.todo_index < self.store.todos.len() {
                     self.store.todos.remove(self.todo_index);
-                    if self.todo_index >= self.store.todos.len() && self.todo_index > 0 {
-                        self.todo_index -= 1;
-                    }
                     self.save();
+                    self.snap_selection();
                     self.status = String::from("todo deleted");
                 }
             }
             Pane::Notes => {
                 if self.note_index < self.store.notes.len() {
                     self.store.notes.remove(self.note_index);
-                    if self.note_index >= self.store.notes.len() && self.note_index > 0 {
-                        self.note_index -= 1;
-                    }
                     self.save();
+                    self.snap_selection();
                     self.status = String::from("note deleted");
                 }
             }
@@ -454,20 +468,14 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: i64) {
-        let len = self.current_len();
-        if len == 0 {
+        let visible = self.visible_indices(self.focus);
+        if visible.is_empty() {
             return;
         }
-        let cur = self.current_index() as i64;
-        let next = (cur + delta).clamp(0, len as i64 - 1) as usize;
-        self.set_index(next);
-    }
-
-    fn current_len(&self) -> usize {
-        match self.focus {
-            Pane::Todos => self.store.todos.len(),
-            Pane::Notes => self.store.notes.len(),
-        }
+        let cur = self.current_index();
+        let pos = visible.iter().position(|&i| i == cur).unwrap_or(0) as i64;
+        let new_pos = (pos + delta).clamp(0, visible.len() as i64 - 1) as usize;
+        self.set_index(visible[new_pos]);
     }
 
     fn current_index(&self) -> usize {
@@ -484,53 +492,53 @@ impl App {
         }
     }
 
-    fn item_matches(&self, idx: usize, pattern_lc: &str) -> bool {
-        match self.focus {
-            Pane::Todos => self
-                .store
+    pub fn visible_todo_indices(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            (0..self.store.todos.len()).collect()
+        } else {
+            let f = self.filter.to_lowercase();
+            self.store
                 .todos
-                .get(idx)
-                .map(|t| t.title.to_lowercase().contains(pattern_lc))
-                .unwrap_or(false),
-            Pane::Notes => self
-                .store
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.title.to_lowercase().contains(&f))
+                .map(|(i, _)| i)
+                .collect()
+        }
+    }
+
+    pub fn visible_note_indices(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            (0..self.store.notes.len()).collect()
+        } else {
+            let f = self.filter.to_lowercase();
+            self.store
                 .notes
-                .get(idx)
-                .map(|n| {
-                    n.title.to_lowercase().contains(pattern_lc)
-                        || n.body.to_lowercase().contains(pattern_lc)
+                .iter()
+                .enumerate()
+                .filter(|(_, n)| {
+                    n.title.to_lowercase().contains(&f) || n.body.to_lowercase().contains(&f)
                 })
-                .unwrap_or(false),
+                .map(|(i, _)| i)
+                .collect()
         }
     }
 
-    fn jump_to_match(&mut self, pattern: &str, forward: bool, from_current: bool) {
-        let pattern_lc = pattern.to_lowercase();
-        let len = self.current_len();
-        if len == 0 {
-            self.status = String::from("no items");
-            return;
+    fn visible_indices(&self, pane: Pane) -> Vec<usize> {
+        match pane {
+            Pane::Todos => self.visible_todo_indices(),
+            Pane::Notes => self.visible_note_indices(),
         }
-        let start = self.current_index();
-        for offset in 0..len {
-            let idx = if forward {
-                (start + if from_current { 0 } else { 1 } + offset) % len
-            } else {
-                let step = if from_current { 0 } else { 1 } + offset;
-                (start + len - (step % len)) % len
-            };
-            if self.item_matches(idx, &pattern_lc) {
-                self.set_index(idx);
-                self.status = format!("/{}", pattern);
-                return;
-            }
-        }
-        self.status = format!("pattern not found: {}", pattern);
     }
 
-    fn repeat_search(&mut self, forward: bool) {
-        if let Some(p) = self.last_search.clone() {
-            self.jump_to_match(&p, forward, false);
+    fn snap_selection(&mut self) {
+        let todo_visible = self.visible_todo_indices();
+        if !todo_visible.contains(&self.todo_index) {
+            self.todo_index = todo_visible.first().copied().unwrap_or(0);
+        }
+        let note_visible = self.visible_note_indices();
+        if !note_visible.contains(&self.note_index) {
+            self.note_index = note_visible.first().copied().unwrap_or(0);
         }
     }
 

@@ -1,6 +1,6 @@
 use crate::app::{App, InputTarget, Mode, Pane};
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
@@ -10,6 +10,8 @@ use ratatui::{
 const ACCENT: Color = Color::Cyan;
 const DIM: Color = Color::DarkGray;
 const ERROR: Color = Color::LightRed;
+const POPUP_BG: Color = Color::Rgb(20, 20, 30);
+const POPUP_FG: Color = Color::Rgb(230, 230, 230);
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -53,14 +55,21 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Pane::Todos => " ◆ todos ",
         Pane::Notes => " ◆ notes ",
     };
-    let line = Line::from(vec![
+    let mut spans = vec![
         title,
         Span::raw(" "),
         Span::styled(counts, Style::default().fg(DIM)),
         Span::raw("  "),
         Span::styled(focus, Style::default().fg(ACCENT).bold()),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
+    ];
+    if !app.filter.is_empty() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!(" filter:/{}/ ", app.filter),
+            Style::default().bg(Color::Yellow).fg(Color::Black).bold(),
+        ));
+    }
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_body(f: &mut Frame, app: &App, area: Rect) {
@@ -73,25 +82,30 @@ fn draw_body(f: &mut Frame, app: &App, area: Rect) {
     draw_notes(f, app, cols[1]);
 }
 
-fn pane_block(title: &str, focused: bool) -> Block<'_> {
+fn pane_block(title: &str, focused: bool, count: usize, total: usize) -> Block<'_> {
     let style = if focused {
         Style::default().fg(ACCENT).bold()
     } else {
         Style::default().fg(DIM)
     };
+    let label = if count == total {
+        format!(" {} [{}] ", title, total)
+    } else {
+        format!(" {} [{}/{}] ", title, count, total)
+    };
     Block::default()
         .borders(Borders::ALL)
         .border_style(style)
-        .title(Span::styled(format!(" {} ", title), style))
+        .title(Span::styled(label, style))
 }
 
 fn draw_todos(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Pane::Todos;
-    let items: Vec<ListItem> = app
-        .store
-        .todos
+    let visible = app.visible_todo_indices();
+    let items: Vec<ListItem> = visible
         .iter()
-        .map(|t| {
+        .map(|&i| {
+            let t = &app.store.todos[i];
             let mark = if t.done { "[x]" } else { "[ ]" };
             let mark_style = if t.done {
                 Style::default().fg(Color::Green)
@@ -108,34 +122,41 @@ fn draw_todos(f: &mut Frame, app: &App, area: Rect) {
             ListItem::new(Line::from(vec![
                 Span::styled(mark, mark_style),
                 Span::raw(" "),
-                Span::styled(t.title.clone(), title_style),
+                Span::styled(highlight_match(&t.title, &app.filter), title_style),
             ]))
         })
         .collect();
 
-    let block = pane_block("Todos", focused);
+    let block = pane_block("Todos", focused, visible.len(), app.store.todos.len());
     let list = List::new(items)
         .block(block)
         .highlight_style(highlight_style(focused))
         .highlight_symbol("▶ ");
     let mut state = ListState::default();
-    if !app.store.todos.is_empty() {
-        state.select(Some(app.todo_index.min(app.store.todos.len() - 1)));
+    if let Some(pos) = visible.iter().position(|&i| i == app.todo_index) {
+        state.select(Some(pos));
+    } else if !visible.is_empty() {
+        state.select(Some(0));
     }
     f.render_stateful_widget(list, area, &mut state);
 
-    if app.store.todos.is_empty() {
-        draw_empty(f, area, "no todos — press i to add");
+    if visible.is_empty() {
+        let msg = if app.store.todos.is_empty() {
+            "no todos — press i to add"
+        } else {
+            "no matches"
+        };
+        draw_empty(f, area, msg);
     }
 }
 
 fn draw_notes(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Pane::Notes;
-    let items: Vec<ListItem> = app
-        .store
-        .notes
+    let visible = app.visible_note_indices();
+    let items: Vec<ListItem> = visible
         .iter()
-        .map(|n| {
+        .map(|&i| {
+            let n = &app.store.notes[i];
             let preview = first_line(&n.body);
             let preview = if preview.is_empty() {
                 String::from("(empty)")
@@ -144,27 +165,44 @@ fn draw_notes(f: &mut Frame, app: &App, area: Rect) {
             };
             ListItem::new(Line::from(vec![
                 Span::styled("● ", Style::default().fg(Color::Magenta)),
-                Span::styled(n.title.clone(), Style::default().fg(Color::White).bold()),
+                Span::styled(
+                    highlight_match(&n.title, &app.filter),
+                    Style::default().fg(Color::White).bold(),
+                ),
                 Span::raw("  "),
-                Span::styled(preview, Style::default().fg(DIM)),
+                Span::styled(
+                    highlight_match(&preview, &app.filter),
+                    Style::default().fg(DIM),
+                ),
             ]))
         })
         .collect();
 
-    let block = pane_block("Notes", focused);
+    let block = pane_block("Notes", focused, visible.len(), app.store.notes.len());
     let list = List::new(items)
         .block(block)
         .highlight_style(highlight_style(focused))
         .highlight_symbol("▶ ");
     let mut state = ListState::default();
-    if !app.store.notes.is_empty() {
-        state.select(Some(app.note_index.min(app.store.notes.len() - 1)));
+    if let Some(pos) = visible.iter().position(|&i| i == app.note_index) {
+        state.select(Some(pos));
+    } else if !visible.is_empty() {
+        state.select(Some(0));
     }
     f.render_stateful_widget(list, area, &mut state);
 
-    if app.store.notes.is_empty() {
-        draw_empty(f, area, "no notes — press i to add");
+    if visible.is_empty() {
+        let msg = if app.store.notes.is_empty() {
+            "no notes — press i to add"
+        } else {
+            "no matches"
+        };
+        draw_empty(f, area, msg);
     }
+}
+
+fn highlight_match(text: &str, _filter: &str) -> String {
+    text.to_string()
 }
 
 fn draw_empty(f: &mut Frame, area: Rect, msg: &str) {
@@ -198,11 +236,16 @@ fn draw_command(f: &mut Frame, app: &App, area: Rect) {
         ]),
         Mode::Search => Line::from(vec![
             Span::styled("/", Style::default().fg(Color::Yellow).bold()),
-            Span::raw(app.search_buffer.clone()),
+            Span::raw(app.filter.clone()),
             Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::raw("  "),
+            Span::styled(
+                "(filtering live — Enter to keep, Esc to cancel)",
+                Style::default().fg(DIM),
+            ),
         ]),
         _ => {
-            let style = if app.status.starts_with("error") || app.status.contains("failed") {
+            let style = if app.status.contains("failed") || app.status.starts_with("error") {
                 Style::default().fg(ERROR)
             } else {
                 Style::default().fg(DIM)
@@ -215,9 +258,9 @@ fn draw_command(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     let hints = match app.mode {
-        Mode::Normal => "hjkl move  i add  dd del  x done  / search  : cmd  e edit-note  q quit",
-        Mode::Command => "Enter run  Esc cancel   commands: :todo :notes :new :delete :w :q :help",
-        Mode::Search => "Enter jump  Esc cancel   then n/N for next/prev",
+        Mode::Normal => "hjkl move/switch  i add  dd del  x done  / filter  Esc clear filter  : cmd  e edit-note  q quit",
+        Mode::Command => "Enter run  Esc cancel   commands: :todo :notes :new :delete :clear :w :q :help",
+        Mode::Search => "type to filter both panes  Enter keep  Esc revert",
         Mode::Input => "Enter confirm  Esc cancel",
         Mode::NoteView => "Esc/Enter close  e edit",
         Mode::NoteEdit => "type to edit  Enter newline  Esc save & close",
@@ -226,6 +269,10 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Span::styled(hints, Style::default().fg(DIM))),
         area,
     );
+}
+
+fn popup_style() -> Style {
+    Style::default().bg(POPUP_BG).fg(POPUP_FG)
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
@@ -240,30 +287,32 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(ACCENT))
+        .style(popup_style())
+        .border_style(Style::default().fg(ACCENT).bg(POPUP_BG))
         .title(Span::styled(
             format!(" {} ", title),
-            Style::default().fg(ACCENT).bold(),
+            Style::default().fg(ACCENT).bg(POPUP_BG).bold(),
         ));
     let text = Line::from(vec![
-        Span::raw(app.input_buffer.clone()),
-        Span::styled("█", Style::default().fg(ACCENT)),
+        Span::styled(app.input_buffer.clone(), popup_style()),
+        Span::styled("█", Style::default().fg(ACCENT).bg(POPUP_BG)),
     ]);
-    f.render_widget(Paragraph::new(text).block(block), popup);
+    f.render_widget(Paragraph::new(text).block(block).style(popup_style()), popup);
 }
 
 fn draw_note_view(f: &mut Frame, app: &App, area: Rect) {
     let Some(note) = app.store.notes.get(app.note_index) else {
         return;
     };
-    let popup = centered_rect(80, 70, area);
+    let popup = centered_rect_abs(80, 70, area);
     f.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta))
+        .style(popup_style())
+        .border_style(Style::default().fg(Color::Magenta).bg(POPUP_BG))
         .title(Span::styled(
             format!(" {} ", note.title),
-            Style::default().fg(Color::Magenta).bold(),
+            Style::default().fg(Color::Magenta).bg(POPUP_BG).bold(),
         ));
     let body = if note.body.is_empty() {
         String::from("(empty — press e to edit)")
@@ -272,6 +321,7 @@ fn draw_note_view(f: &mut Frame, app: &App, area: Rect) {
     };
     let p = Paragraph::new(body)
         .block(block)
+        .style(popup_style())
         .wrap(Wrap { trim: false });
     f.render_widget(p, popup);
 }
@@ -282,17 +332,21 @@ fn draw_note_edit(f: &mut Frame, app: &App, area: Rect) {
         .and_then(|i| app.store.notes.get(i))
         .map(|n| n.title.clone())
         .unwrap_or_else(|| String::from("note"));
-    let popup = centered_rect(80, 70, area);
+    let popup = centered_rect_abs(80, 70, area);
     f.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
+        .style(popup_style())
+        .border_style(Style::default().fg(Color::Yellow).bg(POPUP_BG))
         .title(Span::styled(
             format!(" editing: {} ", title),
-            Style::default().fg(Color::Yellow).bold(),
+            Style::default().fg(Color::Yellow).bg(POPUP_BG).bold(),
         ));
     let body = format!("{}█", app.note_buffer);
-    let p = Paragraph::new(body).block(block).wrap(Wrap { trim: false });
+    let p = Paragraph::new(body)
+        .block(block)
+        .style(popup_style())
+        .wrap(Wrap { trim: false });
     f.render_widget(p, popup);
 }
 
@@ -300,7 +354,28 @@ fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").trim().to_string()
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
+    let h = height.min(r.height);
+    let pad_top = (r.height.saturating_sub(h)) / 2;
+    let v = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(pad_top),
+            Constraint::Length(h),
+            Constraint::Min(0),
+        ])
+        .split(r);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(v[1])[1]
+}
+
+fn centered_rect_abs(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
     let v = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -317,9 +392,4 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(v[1])[1]
-}
-
-#[allow(dead_code)]
-fn alignment_center() -> Alignment {
-    Alignment::Center
 }
