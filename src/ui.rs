@@ -1,4 +1,5 @@
 use crate::app::{App, InputTarget, Mode, Pane};
+use crate::storage::EventKind;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -33,6 +34,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     match app.mode {
         Mode::NoteView => draw_note_view(f, app, area),
         Mode::NoteEdit => draw_note_edit(f, app, area),
+        Mode::History => draw_history(f, app, area),
         _ => {}
     }
 
@@ -259,11 +261,12 @@ fn draw_command(f: &mut Frame, app: &App, area: Rect) {
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     let hints = match app.mode {
         Mode::Normal => "hjkl move/switch  i add  dd del  x done  / filter  Esc clear filter  : cmd  e edit-note  q quit",
-        Mode::Command => "Enter run  Esc cancel   commands: :todo :notes :new :delete :clear :w :q :help",
+        Mode::Command => "Enter run  Esc cancel   commands: :todo :notes :new :delete :history :clear :w :q :help",
         Mode::Search => "type to filter both panes  Enter keep  Esc revert",
         Mode::Input => "Enter confirm  Esc cancel",
         Mode::NoteView => "Esc/Enter close  e edit",
         Mode::NoteEdit => "type to edit  Enter newline  Esc save & close",
+        Mode::History => "j/k scroll  gg/G top/bottom  Esc/q close",
     };
     f.render_widget(
         Paragraph::new(Span::styled(hints, Style::default().fg(DIM))),
@@ -348,6 +351,93 @@ fn draw_note_edit(f: &mut Frame, app: &App, area: Rect) {
         .style(popup_style())
         .wrap(Wrap { trim: false });
     f.render_widget(p, popup);
+}
+
+fn draw_history(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect_abs(80, 80, area);
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(popup_style())
+        .border_style(Style::default().fg(ACCENT).bg(POPUP_BG))
+        .title(Span::styled(
+            format!(" history ({} events) ", app.history_events.len()),
+            Style::default().fg(ACCENT).bg(POPUP_BG).bold(),
+        ));
+
+    if app.history_events.is_empty() {
+        let p = Paragraph::new(Span::styled(
+            "(no events yet — create a todo or note)",
+            Style::default().fg(DIM).bg(POPUP_BG),
+        ))
+        .block(block)
+        .style(popup_style());
+        f.render_widget(p, popup);
+        return;
+    }
+
+    let items: Vec<ListItem> = app
+        .history_events
+        .iter()
+        .map(|e| {
+            let ts = e.ts.format("%Y-%m-%d %H:%M:%S").to_string();
+            let (label, color, detail) = render_event_kind(&e.kind);
+            ListItem::new(Line::from(vec![
+                Span::styled(ts, Style::default().fg(DIM).bg(POPUP_BG)),
+                Span::styled("  ", popup_style()),
+                Span::styled(label, Style::default().fg(color).bg(POPUP_BG).bold()),
+                Span::styled("  ", popup_style()),
+                Span::styled(detail, popup_style()),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .style(popup_style())
+        .highlight_style(
+            Style::default()
+                .bg(ACCENT)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    let mut state = ListState::default();
+    let selected = app
+        .history_scroll
+        .min(app.history_events.len().saturating_sub(1));
+    state.select(Some(selected));
+    f.render_stateful_widget(list, popup, &mut state);
+}
+
+fn render_event_kind(kind: &EventKind) -> (&'static str, Color, String) {
+    match kind {
+        EventKind::TodoCreated { title, .. } => {
+            ("TODO CREATED", Color::Green, format!("\"{}\"", title))
+        }
+        EventKind::TodoRenamed { title, .. } => {
+            ("TODO RENAMED", Color::Yellow, format!("\"{}\"", title))
+        }
+        EventKind::TodoToggled { done, .. } => (
+            "TODO TOGGLED",
+            Color::Blue,
+            format!("done={}", done),
+        ),
+        EventKind::TodoDeleted { .. } => ("TODO DELETED", Color::Red, String::new()),
+        EventKind::NoteCreated { title, .. } => {
+            ("NOTE CREATED", Color::Green, format!("\"{}\"", title))
+        }
+        EventKind::NoteRenamed { title, .. } => {
+            ("NOTE RENAMED", Color::Yellow, format!("\"{}\"", title))
+        }
+        EventKind::NoteEdited { body, .. } => (
+            "NOTE EDITED",
+            Color::Blue,
+            format!("{} chars", body.chars().count()),
+        ),
+        EventKind::NoteDeleted { .. } => ("NOTE DELETED", Color::Red, String::new()),
+    }
 }
 
 fn first_line(s: &str) -> String {

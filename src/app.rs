@@ -1,4 +1,4 @@
-use crate::storage::{self, Note, Store, Todo};
+use crate::storage::{self, Event as HistoryEvent, EventKind, Note, Store, Todo};
 use crate::ui;
 use anyhow::Result;
 use chrono::Utc;
@@ -20,6 +20,7 @@ pub enum Mode {
     Input,
     NoteView,
     NoteEdit,
+    History,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -44,6 +45,8 @@ pub struct App {
     pub filter_backup: String,
     pub note_buffer: String,
     pub editing_note_index: Option<usize>,
+    pub history_events: Vec<HistoryEvent>,
+    pub history_scroll: usize,
     pub should_quit: bool,
     pub pending_d: bool,
     pub pending_g: bool,
@@ -65,6 +68,8 @@ impl App {
             filter_backup: String::new(),
             note_buffer: String::new(),
             editing_note_index: None,
+            history_events: Vec::new(),
+            history_scroll: 0,
             should_quit: false,
             pending_d: false,
             pending_g: false,
@@ -97,6 +102,7 @@ impl App {
             Mode::Input => self.handle_input(key),
             Mode::NoteView => self.handle_note_view(key),
             Mode::NoteEdit => self.handle_note_edit(key),
+            Mode::History => self.handle_history(key),
         }
     }
 
@@ -292,13 +298,21 @@ impl App {
     fn handle_note_edit(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Esc => {
+                let mut edited: Option<EventKind> = None;
                 if let Some(idx) = self.editing_note_index.take() {
                     if let Some(note) = self.store.notes.get_mut(idx) {
                         note.body = std::mem::take(&mut self.note_buffer);
                         note.updated_at = Utc::now();
+                        edited = Some(EventKind::NoteEdited {
+                            id: note.id,
+                            body: note.body.clone(),
+                        });
                     }
                 }
                 self.save();
+                if let Some(kind) = edited {
+                    self.log_event(kind);
+                }
                 self.mode = Mode::Normal;
                 self.status = String::from("note saved");
             }
@@ -358,6 +372,7 @@ impl App {
             }
             "delete" | "rm" => self.delete_current(),
             "toggle" => self.toggle_done(),
+            "history" | "hist" | "log" => self.open_history(),
             "clear" | "nofilter" | "noh" | "nohlsearch" => {
                 self.filter.clear();
                 self.snap_selection();
@@ -365,7 +380,7 @@ impl App {
             }
             "help" | "h" => {
                 self.status = String::from(
-                    "keys: hjkl move/switch | i add | dd delete | x toggle | / filter | : cmd | e edit note",
+                    "keys: hjkl move/switch | i add | dd delete | x toggle | / filter | : cmd | e edit note | :history",
                 );
             }
             other => {
@@ -382,31 +397,59 @@ impl App {
         }
         match target {
             InputTarget::NewTodo => {
-                self.store.todos.push(Todo::new(value));
+                let todo = Todo::new(value);
+                let event = EventKind::TodoCreated {
+                    id: todo.id,
+                    title: todo.title.clone(),
+                };
+                self.store.todos.push(todo);
                 self.todo_index = self.store.todos.len() - 1;
                 self.focus = Pane::Todos;
                 self.save();
+                self.log_event(event);
                 self.status = String::from("todo added");
             }
             InputTarget::NewNote => {
-                self.store.notes.push(Note::new(value));
+                let note = Note::new(value);
+                let event = EventKind::NoteCreated {
+                    id: note.id,
+                    title: note.title.clone(),
+                };
+                self.store.notes.push(note);
                 self.note_index = self.store.notes.len() - 1;
                 self.focus = Pane::Notes;
                 self.save();
+                self.log_event(event);
                 self.status = String::from("note added");
             }
             InputTarget::RenameTodo => {
+                let mut event = None;
                 if let Some(t) = self.store.todos.get_mut(self.todo_index) {
                     t.title = value;
+                    event = Some(EventKind::TodoRenamed {
+                        id: t.id,
+                        title: t.title.clone(),
+                    });
+                }
+                if let Some(e) = event {
                     self.save();
+                    self.log_event(e);
                     self.status = String::from("todo renamed");
                 }
             }
             InputTarget::RenameNote => {
+                let mut event = None;
                 if let Some(n) = self.store.notes.get_mut(self.note_index) {
                     n.title = value;
                     n.updated_at = Utc::now();
+                    event = Some(EventKind::NoteRenamed {
+                        id: n.id,
+                        title: n.title.clone(),
+                    });
+                }
+                if let Some(e) = event {
                     self.save();
+                    self.log_event(e);
                     self.status = String::from("note renamed");
                 }
             }
@@ -425,30 +468,45 @@ impl App {
     }
 
     fn delete_current(&mut self) {
+        let mut event = None;
         match self.focus {
             Pane::Todos => {
-                if self.todo_index < self.store.todos.len() {
-                    self.store.todos.remove(self.todo_index);
-                    self.save();
-                    self.snap_selection();
-                    self.status = String::from("todo deleted");
+                if let Some(t) = self.store.todos.get_mut(self.todo_index) {
+                    if t.deleted_at.is_none() {
+                        t.deleted_at = Some(Utc::now());
+                        event = Some((EventKind::TodoDeleted { id: t.id }, "todo deleted"));
+                    }
                 }
             }
             Pane::Notes => {
-                if self.note_index < self.store.notes.len() {
-                    self.store.notes.remove(self.note_index);
-                    self.save();
-                    self.snap_selection();
-                    self.status = String::from("note deleted");
+                if let Some(n) = self.store.notes.get_mut(self.note_index) {
+                    if n.deleted_at.is_none() {
+                        n.deleted_at = Some(Utc::now());
+                        event = Some((EventKind::NoteDeleted { id: n.id }, "note deleted"));
+                    }
                 }
             }
+        }
+        if let Some((kind, msg)) = event {
+            self.save();
+            self.log_event(kind);
+            self.snap_selection();
+            self.status = String::from(msg);
         }
     }
 
     fn toggle_done(&mut self) {
+        let mut event = None;
         if let Some(t) = self.store.todos.get_mut(self.todo_index) {
             t.done = !t.done;
+            event = Some(EventKind::TodoToggled {
+                id: t.id,
+                done: t.done,
+            });
+        }
+        if let Some(e) = event {
             self.save();
+            self.log_event(e);
         }
     }
 
@@ -493,35 +551,29 @@ impl App {
     }
 
     pub fn visible_todo_indices(&self) -> Vec<usize> {
-        if self.filter.is_empty() {
-            (0..self.store.todos.len()).collect()
-        } else {
-            let f = self.filter.to_lowercase();
-            self.store
-                .todos
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| t.title.to_lowercase().contains(&f))
-                .map(|(i, _)| i)
-                .collect()
-        }
+        let f = self.filter.to_lowercase();
+        self.store
+            .todos
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.deleted_at.is_none())
+            .filter(|(_, t)| f.is_empty() || t.title.to_lowercase().contains(&f))
+            .map(|(i, _)| i)
+            .collect()
     }
 
     pub fn visible_note_indices(&self) -> Vec<usize> {
-        if self.filter.is_empty() {
-            (0..self.store.notes.len()).collect()
-        } else {
-            let f = self.filter.to_lowercase();
-            self.store
-                .notes
-                .iter()
-                .enumerate()
-                .filter(|(_, n)| {
-                    n.title.to_lowercase().contains(&f) || n.body.to_lowercase().contains(&f)
-                })
-                .map(|(i, _)| i)
-                .collect()
-        }
+        let f = self.filter.to_lowercase();
+        self.store
+            .notes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.deleted_at.is_none())
+            .filter(|(_, n)| {
+                f.is_empty() || n.title.to_lowercase().contains(&f) || n.body.to_lowercase().contains(&f)
+            })
+            .map(|(i, _)| i)
+            .collect()
     }
 
     fn visible_indices(&self, pane: Pane) -> Vec<usize> {
@@ -545,6 +597,51 @@ impl App {
     fn save(&mut self) {
         if let Err(e) = storage::save(&self.store) {
             self.status = format!("save failed: {}", e);
+        }
+    }
+
+    fn log_event(&mut self, kind: EventKind) {
+        if let Err(e) = storage::append_event(kind) {
+            self.status = format!("event log failed: {}", e);
+        }
+    }
+
+    fn handle_history(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
+                self.history_events.clear();
+                self.history_scroll = 0;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.history_scroll + 1 < self.history_events.len() {
+                    self.history_scroll += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.history_scroll = self.history_scroll.saturating_sub(1);
+            }
+            KeyCode::Char('g') => {
+                self.history_scroll = 0;
+            }
+            KeyCode::Char('G') => {
+                self.history_scroll = self.history_events.len().saturating_sub(1);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn open_history(&mut self) {
+        match storage::load_events() {
+            Ok(events) => {
+                self.history_events = events;
+                self.history_scroll = self.history_events.len().saturating_sub(1);
+                self.mode = Mode::History;
+            }
+            Err(e) => {
+                self.status = format!("history load failed: {}", e);
+            }
         }
     }
 }
