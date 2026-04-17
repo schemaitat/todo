@@ -160,22 +160,11 @@ fn draw_notes(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|&i| {
             let n = &app.store.notes[i];
-            let preview = first_line(&n.body);
-            let preview = if preview.is_empty() {
-                String::from("(empty)")
-            } else {
-                preview
-            };
             ListItem::new(Line::from(vec![
                 Span::styled("● ", Style::default().fg(Color::Magenta)),
                 Span::styled(
                     highlight_match(&n.title, &app.filter),
                     Style::default().fg(Color::White).bold(),
-                ),
-                Span::raw("  "),
-                Span::styled(
-                    highlight_match(&preview, &app.filter),
-                    Style::default().fg(DIM),
                 ),
             ]))
         })
@@ -655,9 +644,6 @@ fn render_event_kind(kind: &EventKind) -> (&'static str, Color, String) {
     }
 }
 
-fn first_line(s: &str) -> String {
-    s.lines().next().unwrap_or("").trim().to_string()
-}
 
 fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
     let h = height.min(r.height);
