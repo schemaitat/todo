@@ -1,3 +1,4 @@
+use crate::editor::{EditorExit, VimEditor};
 use crate::storage::{self, Event as HistoryEvent, EventKind, Note, Store, Todo};
 use crate::ui;
 use anyhow::Result;
@@ -43,7 +44,7 @@ pub struct App {
     pub input_target: Option<InputTarget>,
     pub filter: String,
     pub filter_backup: String,
-    pub note_buffer: String,
+    pub note_editor: Option<VimEditor>,
     pub editing_note_index: Option<usize>,
     pub history_events: Vec<HistoryEvent>,
     pub history_scroll: usize,
@@ -66,7 +67,7 @@ impl App {
             input_target: None,
             filter: String::new(),
             filter_backup: String::new(),
-            note_buffer: String::new(),
+            note_editor: None,
             editing_note_index: None,
             history_events: Vec::new(),
             history_scroll: 0,
@@ -296,12 +297,33 @@ impl App {
     }
 
     fn handle_note_edit(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Esc => {
+        let Some(editor) = self.note_editor.as_mut() else {
+            self.mode = Mode::Normal;
+            return Ok(());
+        };
+        editor.handle_key(key);
+        if let Some(exit) = editor.exit {
+            self.finish_note_edit(exit);
+        }
+        Ok(())
+    }
+
+    fn finish_note_edit(&mut self, exit: EditorExit) {
+        let editor = match self.note_editor.take() {
+            Some(e) => e,
+            None => {
+                self.mode = Mode::Normal;
+                return;
+            }
+        };
+        let idx = self.editing_note_index.take();
+        match exit {
+            EditorExit::Save => {
+                let body = editor.body();
                 let mut edited: Option<EventKind> = None;
-                if let Some(idx) = self.editing_note_index.take() {
-                    if let Some(note) = self.store.notes.get_mut(idx) {
-                        note.body = std::mem::take(&mut self.note_buffer);
+                if let Some(i) = idx {
+                    if let Some(note) = self.store.notes.get_mut(i) {
+                        note.body = body;
                         note.updated_at = Utc::now();
                         edited = Some(EventKind::NoteEdited {
                             id: note.id,
@@ -313,24 +335,13 @@ impl App {
                 if let Some(kind) = edited {
                     self.log_event(kind);
                 }
-                self.mode = Mode::Normal;
                 self.status = String::from("note saved");
             }
-            KeyCode::Enter => {
-                self.note_buffer.push('\n');
+            EditorExit::Cancel => {
+                self.status = String::from("edit cancelled");
             }
-            KeyCode::Tab => {
-                self.note_buffer.push_str("    ");
-            }
-            KeyCode::Backspace => {
-                self.note_buffer.pop();
-            }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.note_buffer.push(c);
-            }
-            _ => {}
         }
-        Ok(())
+        self.mode = Mode::Normal;
     }
 
     fn run_command(&mut self, cmd: &str) {
@@ -518,10 +529,10 @@ impl App {
 
     fn open_note_edit(&mut self) {
         if let Some(note) = self.store.notes.get(self.note_index) {
-            self.note_buffer = note.body.clone();
+            self.note_editor = Some(VimEditor::new(&note.body));
             self.editing_note_index = Some(self.note_index);
             self.mode = Mode::NoteEdit;
-            self.status = String::from("editing note — Esc to save");
+            self.status = String::from("editing note — :w save  :q cancel  i insert  Esc normal");
         }
     }
 

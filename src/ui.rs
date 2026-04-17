@@ -1,4 +1,5 @@
 use crate::app::{App, InputTarget, Mode, Pane};
+use crate::editor::{EditorMode, VimEditor};
 use crate::storage::EventKind;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -265,7 +266,7 @@ fn draw_help(f: &mut Frame, app: &App, area: Rect) {
         Mode::Search => "type to filter both panes  Enter keep  Esc revert",
         Mode::Input => "Enter confirm  Esc cancel",
         Mode::NoteView => "Esc/Enter close  e edit",
-        Mode::NoteEdit => "type to edit  Enter newline  Esc save & close",
+        Mode::NoteEdit => "vim keys: hjkl move  i/a/o insert  dd del-line  yy p  u undo  v visual  :w save  :q cancel",
         Mode::History => "j/k scroll  gg/G top/bottom  Esc/q close",
     };
     f.render_widget(
@@ -335,22 +336,230 @@ fn draw_note_edit(f: &mut Frame, app: &App, area: Rect) {
         .and_then(|i| app.store.notes.get(i))
         .map(|n| n.title.clone())
         .unwrap_or_else(|| String::from("note"));
-    let popup = centered_rect_abs(80, 70, area);
+    let Some(editor) = app.note_editor.as_ref() else {
+        return;
+    };
+    let popup = centered_rect_abs(92, 88, area);
     f.render_widget(Clear, popup);
+
+    let mode_label = match editor.mode {
+        EditorMode::Normal => " NORMAL ",
+        EditorMode::Insert => " INSERT ",
+        EditorMode::Visual => " VISUAL ",
+        EditorMode::Command => " COMMAND ",
+    };
+    let mode_color = match editor.mode {
+        EditorMode::Normal => Color::Cyan,
+        EditorMode::Insert => Color::Green,
+        EditorMode::Visual => Color::Magenta,
+        EditorMode::Command => Color::Yellow,
+    };
+    let header = format!(" {} — {} ", title, editor.lines.len());
     let block = Block::default()
         .borders(Borders::ALL)
         .style(popup_style())
-        .border_style(Style::default().fg(Color::Yellow).bg(POPUP_BG))
+        .border_style(Style::default().fg(mode_color).bg(POPUP_BG))
         .title(Span::styled(
-            format!(" editing: {} ", title),
-            Style::default().fg(Color::Yellow).bg(POPUP_BG).bold(),
-        ));
-    let body = format!("{}█", app.note_buffer);
-    let p = Paragraph::new(body)
-        .block(block)
-        .style(popup_style())
-        .wrap(Wrap { trim: false });
-    f.render_widget(p, popup);
+            header,
+            Style::default().fg(mode_color).bg(POPUP_BG).bold(),
+        ))
+        .title_bottom(Line::from(vec![
+            Span::styled(
+                mode_label,
+                Style::default().bg(mode_color).fg(Color::Black).bold(),
+            ),
+            Span::styled(
+                format!(" {}:{} ", editor.row + 1, editor.col + 1),
+                Style::default().fg(POPUP_FG).bg(POPUP_BG),
+            ),
+        ]));
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let status_h: u16 = 1;
+    let body_h = inner.height.saturating_sub(status_h);
+    let body_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: body_h,
+    };
+    let status_area = Rect {
+        x: inner.x,
+        y: inner.y + body_h,
+        width: inner.width,
+        height: status_h,
+    };
+
+    editor.viewport_height.set(body_area.height as usize);
+    update_scroll(editor, body_area.height as usize);
+    let scroll = editor.scroll.get();
+
+    let gutter_w = gutter_width(editor.lines.len());
+    let text_x = body_area.x + gutter_w + 1;
+    let text_w = body_area.width.saturating_sub(gutter_w + 1);
+
+    let lines = render_editor_lines(editor, scroll, body_area.height as usize, text_w as usize);
+    let p = Paragraph::new(lines).style(popup_style());
+    let text_area = Rect {
+        x: text_x,
+        y: body_area.y,
+        width: text_w,
+        height: body_area.height,
+    };
+    f.render_widget(p, text_area);
+
+    let gutter = render_gutter(editor, scroll, body_area.height as usize, gutter_w as usize);
+    let gutter_area = Rect {
+        x: body_area.x,
+        y: body_area.y,
+        width: gutter_w,
+        height: body_area.height,
+    };
+    f.render_widget(
+        Paragraph::new(gutter).style(Style::default().fg(DIM).bg(POPUP_BG)),
+        gutter_area,
+    );
+
+    let status_line = build_status_line(editor);
+    f.render_widget(
+        Paragraph::new(status_line).style(popup_style()),
+        status_area,
+    );
+
+    if editor.mode == EditorMode::Insert {
+        let screen_row = editor.row.saturating_sub(scroll);
+        if (screen_row as u16) < body_area.height {
+            let col_offset = editor.col as u16;
+            if col_offset < text_w {
+                f.set_cursor_position((text_x + col_offset, body_area.y + screen_row as u16));
+            }
+        }
+    }
+}
+
+fn update_scroll(editor: &VimEditor, height: usize) {
+    if height == 0 {
+        return;
+    }
+    let mut scroll = editor.scroll.get();
+    if editor.row < scroll {
+        scroll = editor.row;
+    } else if editor.row >= scroll + height {
+        scroll = editor.row + 1 - height;
+    }
+    editor.scroll.set(scroll);
+}
+
+fn gutter_width(n_lines: usize) -> u16 {
+    let digits = n_lines.max(1).to_string().len() as u16;
+    digits.max(3) + 1
+}
+
+fn render_gutter(editor: &VimEditor, scroll: usize, height: usize, width: usize) -> Vec<Line<'static>> {
+    let mut out = Vec::with_capacity(height);
+    for i in 0..height {
+        let r = scroll + i;
+        if r >= editor.lines.len() {
+            out.push(Line::from(Span::styled(
+                " ".repeat(width),
+                Style::default().bg(POPUP_BG),
+            )));
+            continue;
+        }
+        let num = if r == editor.row {
+            format!("{:>width$} ", r + 1, width = width - 1)
+        } else {
+            let rel = r.abs_diff(editor.row);
+            format!("{:>width$} ", rel, width = width - 1)
+        };
+        let style = if r == editor.row {
+            Style::default().fg(Color::Yellow).bg(POPUP_BG).bold()
+        } else {
+            Style::default().fg(DIM).bg(POPUP_BG)
+        };
+        out.push(Line::from(Span::styled(num, style)));
+    }
+    out
+}
+
+fn render_editor_lines(
+    editor: &VimEditor,
+    scroll: usize,
+    height: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let visual = editor.visual_range();
+    let mut out = Vec::with_capacity(height);
+    for i in 0..height {
+        let r = scroll + i;
+        if r >= editor.lines.len() {
+            out.push(Line::from(Span::styled(
+                "~".to_string(),
+                Style::default().fg(DIM).bg(POPUP_BG),
+            )));
+            continue;
+        }
+        let raw = &editor.lines[r];
+        let chars: Vec<char> = raw.chars().collect();
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let cursor_here = r == editor.row && editor.mode != EditorMode::Insert;
+        let total_chars = chars.len();
+        let visible_len = total_chars.max(1);
+        for (c, ch) in chars.iter().enumerate().take(width.max(1)) {
+            let selected = visual
+                .map(|((sr, sc), (er, ec))| {
+                    (r > sr || (r == sr && c >= sc)) && (r < er || (r == er && c <= ec))
+                })
+                .unwrap_or(false);
+            let is_cursor = cursor_here && c == editor.col;
+            let style = if is_cursor {
+                Style::default().bg(Color::White).fg(Color::Black)
+            } else if selected {
+                Style::default().bg(Color::DarkGray).fg(POPUP_FG)
+            } else {
+                popup_style()
+            };
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+        if cursor_here && editor.col >= total_chars {
+            spans.push(Span::styled(
+                " ".to_string(),
+                Style::default().bg(Color::White).fg(Color::Black),
+            ));
+        }
+        if total_chars == 0 && !cursor_here {
+            spans.push(Span::styled(String::new(), popup_style()));
+        }
+        let _ = visible_len;
+        out.push(Line::from(spans));
+    }
+    out
+}
+
+fn build_status_line(editor: &VimEditor) -> Line<'static> {
+    match editor.mode {
+        EditorMode::Command => Line::from(vec![
+            Span::styled(":", Style::default().fg(Color::Yellow).bg(POPUP_BG).bold()),
+            Span::styled(editor.command_buffer.clone(), popup_style()),
+            Span::styled("_", Style::default().fg(Color::Yellow).bg(POPUP_BG)),
+        ]),
+        _ => {
+            let hint = match editor.mode {
+                EditorMode::Normal => "i insert  v visual  :w save  :q cancel  u undo  dd yy p",
+                EditorMode::Insert => "Esc normal",
+                EditorMode::Visual => "d cut  y yank  c change  Esc normal",
+                EditorMode::Command => "",
+            };
+            let text = if editor.status.is_empty() {
+                hint.to_string()
+            } else {
+                editor.status.clone()
+            };
+            Line::from(Span::styled(text, Style::default().fg(DIM).bg(POPUP_BG)))
+        }
+    }
 }
 
 fn draw_history(f: &mut Frame, app: &App, area: Rect) {
