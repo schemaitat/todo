@@ -31,6 +31,7 @@ pub struct VimEditor {
     pub status: String,
     pub exit: Option<EditorExit>,
     pub visual_anchor: Option<(usize, usize)>,
+    pub visual_linewise: bool,
     pub pending: Option<char>,
     pub scroll: Cell<usize>,
     pub viewport_height: Cell<usize>,
@@ -55,6 +56,7 @@ impl VimEditor {
             status: String::new(),
             exit: None,
             visual_anchor: None,
+            visual_linewise: false,
             pending: None,
             scroll: Cell::new(0),
             viewport_height: Cell::new(20),
@@ -73,7 +75,14 @@ impl VimEditor {
         let (ar, ac) = self.visual_anchor?;
         let a = (ar, ac);
         let c = (self.row, self.col);
-        Some(if a <= c { (a, c) } else { (c, a) })
+        let (s, e) = if a <= c { (a, c) } else { (c, a) };
+        if self.visual_linewise {
+            let last_len = self.line_char_len(e.0);
+            let last_col = last_len.saturating_sub(if last_len == 0 { 0 } else { 1 });
+            Some(((s.0, 0), (e.0, last_col)))
+        } else {
+            Some((s, e))
+        }
     }
 
     fn snap(&self) -> Snap {
@@ -238,7 +247,14 @@ impl VimEditor {
             (KeyCode::Char('v'), false) => {
                 self.mode = EditorMode::Visual;
                 self.visual_anchor = Some((self.row, self.col));
+                self.visual_linewise = false;
                 self.status = String::from("-- VISUAL --");
+            }
+            (KeyCode::Char('V'), false) => {
+                self.mode = EditorMode::Visual;
+                self.visual_anchor = Some((self.row, self.col));
+                self.visual_linewise = true;
+                self.status = String::from("-- V-LINE --");
             }
             (KeyCode::Char(':'), false) => {
                 self.mode = EditorMode::Command;
@@ -386,10 +402,32 @@ impl VimEditor {
     fn handle_visual(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (key.code, ctrl) {
-            (KeyCode::Esc, _) | (KeyCode::Char('v'), false) => {
+            (KeyCode::Esc, _) => {
                 self.mode = EditorMode::Normal;
                 self.visual_anchor = None;
+                self.visual_linewise = false;
                 self.status.clear();
+            }
+            (KeyCode::Char('v'), false) => {
+                if self.visual_linewise {
+                    self.visual_linewise = false;
+                    self.status = String::from("-- VISUAL --");
+                } else {
+                    self.mode = EditorMode::Normal;
+                    self.visual_anchor = None;
+                    self.status.clear();
+                }
+            }
+            (KeyCode::Char('V'), false) => {
+                if self.visual_linewise {
+                    self.mode = EditorMode::Normal;
+                    self.visual_anchor = None;
+                    self.visual_linewise = false;
+                    self.status.clear();
+                } else {
+                    self.visual_linewise = true;
+                    self.status = String::from("-- V-LINE --");
+                }
             }
             (KeyCode::Char('h'), false) | (KeyCode::Left, _) => self.move_left(),
             (KeyCode::Char('l'), false) | (KeyCode::Right, _) => self.move_right_visual(),
@@ -409,26 +447,53 @@ impl VimEditor {
                 self.col = 0;
             }
             (KeyCode::Char('y'), false) => {
-                if let Some((s, e)) = self.visual_range() {
+                if self.visual_linewise {
+                    if let Some(((sr, _), (er, _))) = self.visual_range() {
+                        self.yank_lines(sr, er);
+                    }
+                } else if let Some((s, e)) = self.visual_range() {
                     self.yank_range(s, self.next_pos(e));
                 }
                 self.mode = EditorMode::Normal;
                 self.visual_anchor = None;
+                self.visual_linewise = false;
             }
             (KeyCode::Char('d'), false) | (KeyCode::Char('x'), false) => {
-                if let Some((s, e)) = self.visual_range() {
+                if self.visual_linewise {
+                    if let Some(((sr, _), (er, _))) = self.visual_range() {
+                        self.push_undo();
+                        self.delete_lines(sr, er);
+                    }
+                } else if let Some((s, e)) = self.visual_range() {
                     self.push_undo();
                     self.delete_range(s, self.next_pos(e));
                 }
                 self.mode = EditorMode::Normal;
                 self.visual_anchor = None;
+                self.visual_linewise = false;
             }
             (KeyCode::Char('c'), false) => {
-                if let Some((s, e)) = self.visual_range() {
+                if self.visual_linewise {
+                    if let Some(((sr, _), (er, _))) = self.visual_range() {
+                        self.push_undo();
+                        self.yank_lines(sr, er);
+                        for _ in sr..=er {
+                            if self.lines.len() > 1 {
+                                self.lines.remove(sr);
+                            } else {
+                                self.lines[0].clear();
+                            }
+                        }
+                        self.lines.insert(sr, String::new());
+                        self.row = sr;
+                        self.col = 0;
+                    }
+                } else if let Some((s, e)) = self.visual_range() {
                     self.push_undo();
                     self.delete_range(s, self.next_pos(e));
                 }
                 self.visual_anchor = None;
+                self.visual_linewise = false;
                 self.enter_insert();
             }
             _ => {
@@ -735,6 +800,33 @@ impl VimEditor {
         if self.row >= self.lines.len() {
             self.row = self.lines.len() - 1;
         }
+        self.col = self.first_nonblank(self.row);
+    }
+
+    fn yank_lines(&mut self, sr: usize, er: usize) {
+        let mut out = String::new();
+        for i in sr..=er {
+            if let Some(l) = self.lines.get(i) {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+        self.register = out;
+        self.register_linewise = true;
+    }
+
+    fn delete_lines(&mut self, sr: usize, er: usize) {
+        self.yank_lines(sr, er);
+        let count = er - sr + 1;
+        for _ in 0..count {
+            if sr < self.lines.len() {
+                self.lines.remove(sr);
+            }
+        }
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.row = sr.min(self.lines.len() - 1);
         self.col = self.first_nonblank(self.row);
     }
 

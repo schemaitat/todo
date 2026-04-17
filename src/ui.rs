@@ -345,7 +345,13 @@ fn draw_note_edit(f: &mut Frame, app: &App, area: Rect) {
     let mode_label = match editor.mode {
         EditorMode::Normal => " NORMAL ",
         EditorMode::Insert => " INSERT ",
-        EditorMode::Visual => " VISUAL ",
+        EditorMode::Visual => {
+            if editor.visual_linewise {
+                " V-LINE "
+            } else {
+                " VISUAL "
+            }
+        }
         EditorMode::Command => " COMMAND ",
     };
     let mode_color = match editor.mode {
