@@ -1,17 +1,18 @@
-[package]
-name = "todo-tui"
-version = "0.2.0"
-edition = "2021"
+[workspace]
+resolver = "2"
+members = ["crates/todo-store", "crates/todo-tui", "crates/todo-mailer"]
 
-[dependencies]
-ratatui = "0.29"
-crossterm = "0.28"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-dirs = "5"
+[workspace.package]
+edition = "2021"
+version = "0.2.0"
+
+[workspace.dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
+dirs = "5"
 
 [profile.release]
 lto = true

@@ -2,7 +2,7 @@
 
 use crate::app::{App, InputTarget, Mode, Pane};
 use crate::editor::{EditorMode, VimEditor};
-use crate::storage::EventKind;
+use todo_store::EventKind;
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},

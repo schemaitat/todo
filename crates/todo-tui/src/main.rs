@@ -1,6 +1,5 @@
 mod app;
 mod editor;
-mod storage;
 mod ui;
 
 use anyhow::Result;
@@ -12,7 +11,7 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::stdout;
 
 fn main() -> Result<()> {
-    let store = storage::load()?;
+    let store = todo_store::load()?;
 
     enable_raw_mode()?;
     let mut out = stdout();

@@ -1,0 +1,18 @@
+[package]
+name = "todo-mailer"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/email.rs"
+
+[[bin]]
+name = "todo-mailer"
+path = "src/main.rs"
+
+[dependencies]
+todo-store = { path = "../todo-store" }
+anyhow.workspace = true
+chrono.workspace = true
+dotenvy = "0.15"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls-tls", "builder"] }

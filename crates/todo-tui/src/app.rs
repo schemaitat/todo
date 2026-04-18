@@ -1,11 +1,11 @@
 use crate::editor::{EditorExit, VimEditor};
-use crate::storage::{self, Event as HistoryEvent, EventKind, Note, Store, Todo};
 use crate::ui;
 use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{backend::Backend, Terminal};
 use std::time::Duration;
+use todo_store::{self as storage, Event as HistoryEvent, EventKind, Note, Store, Todo};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pane {
