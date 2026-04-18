@@ -625,7 +625,13 @@ impl VimEditor {
     }
 
     fn word_forward_target(&self, mut r: usize, mut c: usize, word: bool) -> (usize, usize) {
-        let klass = |ch: char| if word { Self::char_class_word(ch) } else { Self::char_class_ws(ch) };
+        let klass = |ch: char| {
+            if word {
+                Self::char_class_word(ch)
+            } else {
+                Self::char_class_ws(ch)
+            }
+        };
         let start_class = self.char_at(r, c).map(klass).unwrap_or(0);
         loop {
             let len = self.line_char_len(r);
@@ -673,7 +679,13 @@ impl VimEditor {
     }
 
     fn move_word_back(&mut self, word: bool) {
-        let klass = |ch: char| if word { Self::char_class_word(ch) } else { Self::char_class_ws(ch) };
+        let klass = |ch: char| {
+            if word {
+                Self::char_class_word(ch)
+            } else {
+                Self::char_class_ws(ch)
+            }
+        };
         let (mut r, mut c) = (self.row, self.col);
         loop {
             if c == 0 {
@@ -690,11 +702,15 @@ impl VimEditor {
             } else {
                 c -= 1;
             }
-            let Some(ch) = self.char_at(r, c) else { continue };
+            let Some(ch) = self.char_at(r, c) else {
+                continue;
+            };
             if klass(ch) != 0 {
                 // walk back through same class
                 while c > 0 {
-                    let Some(prev) = self.char_at(r, c - 1) else { break };
+                    let Some(prev) = self.char_at(r, c - 1) else {
+                        break;
+                    };
                     if klass(prev) == klass(ch) {
                         c -= 1;
                     } else {
@@ -709,7 +725,13 @@ impl VimEditor {
     }
 
     fn move_word_end(&mut self, word: bool) {
-        let klass = |ch: char| if word { Self::char_class_word(ch) } else { Self::char_class_ws(ch) };
+        let klass = |ch: char| {
+            if word {
+                Self::char_class_word(ch)
+            } else {
+                Self::char_class_ws(ch)
+            }
+        };
         let (mut r, mut c) = (self.row, self.col);
         let len = self.line_char_len(r);
         if c + 1 < len {
@@ -747,7 +769,9 @@ impl VimEditor {
             if c + 1 >= len {
                 break;
             }
-            let Some(next) = self.char_at(r, c + 1) else { break };
+            let Some(next) = self.char_at(r, c + 1) else {
+                break;
+            };
             if klass(next) != k {
                 break;
             }

@@ -1,6 +1,9 @@
+// Ratatui-based rendering for the todo-tui frontend.
+
 use crate::app::{App, InputTarget, Mode, Pane};
 use crate::editor::{EditorMode, VimEditor};
 use crate::storage::EventKind;
+
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
@@ -116,9 +119,7 @@ fn draw_todos(f: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(Color::Yellow)
             };
             let title_style = if t.done {
-                Style::default()
-                    .fg(DIM)
-                    .add_modifier(Modifier::CROSSED_OUT)
+                Style::default().fg(DIM).add_modifier(Modifier::CROSSED_OUT)
             } else {
                 Style::default().fg(Color::White)
             };
@@ -290,7 +291,10 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(app.input_buffer.clone(), popup_style()),
         Span::styled("█", Style::default().fg(ACCENT).bg(POPUP_BG)),
     ]);
-    f.render_widget(Paragraph::new(text).block(block).style(popup_style()), popup);
+    f.render_widget(
+        Paragraph::new(text).block(block).style(popup_style()),
+        popup,
+    );
 }
 
 fn draw_note_view(f: &mut Frame, app: &App, area: Rect) {
@@ -452,7 +456,12 @@ fn gutter_width(n_lines: usize) -> u16 {
     digits.max(3) + 1
 }
 
-fn render_gutter(editor: &VimEditor, scroll: usize, height: usize, width: usize) -> Vec<Line<'static>> {
+fn render_gutter(
+    editor: &VimEditor,
+    scroll: usize,
+    height: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
     let mut out = Vec::with_capacity(height);
     for i in 0..height {
         let r = scroll + i;
@@ -501,7 +510,6 @@ fn render_editor_lines(
         let mut spans: Vec<Span<'static>> = Vec::new();
         let cursor_here = r == editor.row && editor.mode != EditorMode::Insert;
         let total_chars = chars.len();
-        let visible_len = total_chars.max(1);
         for (c, ch) in chars.iter().enumerate().take(width.max(1)) {
             let selected = visual
                 .map(|((sr, sc), (er, ec))| {
@@ -527,7 +535,6 @@ fn render_editor_lines(
         if total_chars == 0 && !cursor_here {
             spans.push(Span::styled(String::new(), popup_style()));
         }
-        let _ = visible_len;
         out.push(Line::from(spans));
     }
     out
@@ -623,11 +630,9 @@ fn render_event_kind(kind: &EventKind) -> (&'static str, Color, String) {
         EventKind::TodoRenamed { title, .. } => {
             ("TODO RENAMED", Color::Yellow, format!("\"{}\"", title))
         }
-        EventKind::TodoToggled { done, .. } => (
-            "TODO TOGGLED",
-            Color::Blue,
-            format!("done={}", done),
-        ),
+        EventKind::TodoToggled { done, .. } => {
+            ("TODO TOGGLED", Color::Blue, format!("done={}", done))
+        }
         EventKind::TodoDeleted { .. } => ("TODO DELETED", Color::Red, String::new()),
         EventKind::NoteCreated { title, .. } => {
             ("NOTE CREATED", Color::Green, format!("\"{}\"", title))
@@ -643,7 +648,6 @@ fn render_event_kind(kind: &EventKind) -> (&'static str, Color, String) {
         EventKind::NoteDeleted { .. } => ("NOTE DELETED", Color::Red, String::new()),
     }
 }
-
 
 fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
     let h = height.min(r.height);

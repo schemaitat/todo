@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,8 +102,7 @@ pub fn load() -> Result<Store> {
     if !path.exists() {
         return Ok(Store::default());
     }
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     if raw.trim().is_empty() {
         return Ok(Store::default());
     }

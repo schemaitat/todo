@@ -581,7 +581,9 @@ impl App {
             .enumerate()
             .filter(|(_, n)| n.deleted_at.is_none())
             .filter(|(_, n)| {
-                f.is_empty() || n.title.to_lowercase().contains(&f) || n.body.to_lowercase().contains(&f)
+                f.is_empty()
+                    || n.title.to_lowercase().contains(&f)
+                    || n.body.to_lowercase().contains(&f)
             })
             .map(|(i, _)| i)
             .collect()
