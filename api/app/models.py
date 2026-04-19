@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -16,23 +16,23 @@ from sqlalchemy import (
     Uuid,
     func,
 )
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # SQLite can only autoincrement plain INTEGER PRIMARY KEY columns; map BIGINT → INTEGER there.
 BigIntPK = BigInteger().with_variant(Integer(), "sqlite")
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
     pass
 
 
-class EntityType(str, Enum):
+class EntityType(StrEnum):
     TODO = "todo"
     NOTE = "note"
     CONTEXT = "context"
 
 
-class EventKind(str, Enum):
+class EventKind(StrEnum):
     TODO_CREATED = "TodoCreated"
     TODO_RENAMED = "TodoRenamed"
     TODO_TOGGLED = "TodoToggled"
@@ -60,15 +60,21 @@ class User(Base):
     )
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    api_keys: Mapped[list[ApiKey]] = relationship(back_populates="user", cascade="all, delete-orphan")
-    contexts: Mapped[list[Context]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    api_keys: Mapped[list[ApiKey]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    contexts: Mapped[list[Context]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class ApiKey(Base):
     __tablename__ = "api_keys"
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    user_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
     key_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
     label: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -85,7 +91,9 @@ class Context(Base):
     __table_args__ = (Index("ix_contexts_user_slug", "user_id", "slug", unique=True),)
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
-    user_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
     slug: Mapped[str] = mapped_column(String(64), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     color: Mapped[str] = mapped_column(String(16), nullable=False, default="#8888ff")
@@ -150,7 +158,9 @@ class Event(Base):
     )
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
-    user_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
     context_id: Mapped[UUID | None] = mapped_column(
         Uuid, ForeignKey("contexts.id", ondelete="SET NULL"), nullable=True
     )

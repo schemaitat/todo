@@ -3,13 +3,13 @@ default:
 
 # --- Rust ------------------------------------------------------------------
 
-fmt:
+rs-fmt:
     cargo fmt --all
 
-lint:
+rs-lint:
     cargo clippy --all-targets --all-features --fix --allow-dirty
 
-check: fmt lint
+rs-qc: rs-fmt rs-lint
 
 build:
     cargo build --release
@@ -24,13 +24,20 @@ tui:
 test-rust:
     cargo test --workspace
 
-# --- Python API ------------------------------------------------------------
+# --- Python ----------------------------------------------------------------
+
+py-qc:
+    uv run ruff format api automation
+    uv run ruff check --fix api automation
+    uv run ty check api/app automation/flows
 
 api-dev:
-    cd api && DATABASE_URL="${DATABASE_URL:-sqlite+aiosqlite:///./todo.db}" .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    #!/usr/bin/env bash
+    set -a && source .env && set +a
+    DATABASE_URL="${DATABASE_URL:-sqlite+aiosqlite:///./api/todo.db}" uv run --directory api uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 test-api:
-    cd api && .venv/bin/pytest -q
+    uv run --directory api pytest -q
 
 # --- Deploy (compose) ------------------------------------------------------
 
@@ -92,9 +99,8 @@ deploy:
     rsync -az --delete \
         --exclude='.git' \
         --exclude='target/' \
-        --exclude='api/.venv' \
-        --exclude='api/__pycache__' \
-        --exclude='automation/.venv' \
+        --exclude='.venv' \
+        --exclude='__pycache__' \
         --exclude='api/todo.db' \
         --exclude='.env' \
         . "$host":/srv/todo

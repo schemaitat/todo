@@ -2,25 +2,26 @@
 """One-shot migration of legacy todo-tui JSON data into the API database.
 
 Legacy layout (~/Library/Application Support/todo-tui/):
-  data.json   – {"todos": [...], "notes": [...]}
-  events.jsonl – one JSON object per line, {"ts": "...", "kind": {"type": "...", "id": "...", ...}}
+  data.json   - {"todos": [...], "notes": [...]}
+  events.jsonl - one JSON object per line, {"ts": "...", "kind": {"type": "...", "id": "...", ...}}
 
 Usage:
   python scripts/import_legacy.py [--dry-run] [--data-json PATH] [--events-jsonl PATH]
                                    [--email EMAIL] [--context inbox]
 """
+
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # Resolve default legacy data path (macOS: ~/Library/Application Support/todo-tui)
 _DEFAULT_DATA_DIR = Path.home() / "Library" / "Application Support" / "todo-tui"
@@ -29,7 +30,7 @@ _DEFAULT_DATA_DIR = Path.home() / "Library" / "Application Support" / "todo-tui"
 def _parse_dt(s: str) -> datetime:
     dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        return dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -111,7 +112,10 @@ async def _run(
             await session.execute(select(User).where(User.email == user_email))
         ).scalar_one_or_none()
         if user is None:
-            print(f"ERROR: no user with email {user_email!r} found — run the API first to bootstrap", file=sys.stderr)
+            print(
+                f"ERROR: no user with email {user_email!r} found — run the API first to bootstrap",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
         # Resolve context
@@ -121,7 +125,10 @@ async def _run(
             )
         ).scalar_one_or_none()
         if ctx is None:
-            print(f"ERROR: context {context_slug!r} not found for user {user_email!r}", file=sys.stderr)
+            print(
+                f"ERROR: context {context_slug!r} not found for user {user_email!r}",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
         print(f"Importing into context '{ctx.slug}' (id={ctx.id}) for user {user.email}")
@@ -165,15 +172,17 @@ async def _run(
             except Exception as exc:
                 print(f"  skipping malformed event {raw}: {exc}")
                 continue
-            session.add(Event(
-                user_id=user.id,
-                context_id=ctx.id,
-                entity_type=ev["entity_type"],
-                entity_id=ev["entity_id"],
-                kind=ev["kind"],
-                payload=ev["payload"],
-                ts=ev["ts"],
-            ))
+            session.add(
+                Event(
+                    user_id=user.id,
+                    context_id=ctx.id,
+                    entity_type=ev["entity_type"],
+                    entity_id=ev["entity_id"],
+                    kind=ev["kind"],
+                    payload=ev["payload"],
+                    ts=ev["ts"],
+                )
+            )
             event_count += 1
 
         await session.commit()
@@ -199,7 +208,9 @@ def main() -> None:
     parser.add_argument("--data-json", type=Path, default=_DEFAULT_DATA_DIR / "data.json")
     parser.add_argument("--events-jsonl", type=Path, default=_DEFAULT_DATA_DIR / "events.jsonl")
     parser.add_argument("--database-url", default=None, help="Overrides DATABASE_URL env var")
-    parser.add_argument("--email", default="a.schemaitat@gmail.com", help="User email to import into")
+    parser.add_argument(
+        "--email", default="a.schemaitat@gmail.com", help="User email to import into"
+    )
     parser.add_argument("--context", default="inbox", help="Target context slug")
     parser.add_argument("--dry-run", action="store_true", help="Print counts without writing")
     args = parser.parse_args()
@@ -211,16 +222,21 @@ def main() -> None:
     database_url = args.database_url
     if database_url is None:
         import os
-        database_url = os.environ.get("DATABASE_URL", "postgresql+asyncpg://todo:todo@localhost:5432/todo")
 
-    asyncio.run(_run(
-        database_url=database_url,
-        data_path=args.data_json,
-        events_path=args.events_jsonl,
-        user_email=args.email,
-        context_slug=args.context,
-        dry_run=args.dry_run,
-    ))
+        database_url = os.environ.get(
+            "DATABASE_URL", "postgresql+asyncpg://todo:todo@localhost:5432/todo"
+        )
+
+    asyncio.run(
+        _run(
+            database_url=database_url,
+            data_path=args.data_json,
+            events_path=args.events_jsonl,
+            user_email=args.email,
+            context_slug=args.context,
+            dry_run=args.dry_run,
+        )
+    )
 
 
 if __name__ == "__main__":

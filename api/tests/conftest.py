@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
 from collections.abc import AsyncIterator
@@ -48,8 +49,6 @@ async def api(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[tuple[AsyncClien
 
     await database.dispose()
     db_path.unlink(missing_ok=True)
-    try:
+    with contextlib.suppress(OSError):
         tmpdir.rmdir()
-    except OSError:
-        pass
     get_settings.cache_clear()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from email.utils import format_datetime, parsedate_to_datetime
 from uuid import UUID
 
@@ -41,7 +41,7 @@ async def _load_note(session: AsyncSession, user: User, note_id: UUID) -> Note:
 
 def _to_http_date(dt: datetime) -> str:
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return format_datetime(dt, usegmt=True)
 
 
@@ -116,14 +116,14 @@ async def update_note(
             ) from e
         current = note.updated_at
         if current.tzinfo is None:
-            current = current.replace(tzinfo=timezone.utc)
+            current = current.replace(tzinfo=UTC)
         if abs((current - expected).total_seconds()) > 1:
             raise HTTPException(
                 status_code=status.HTTP_412_PRECONDITION_FAILED,
                 detail="note changed elsewhere",
             )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     events: list[tuple[EventKind, dict]] = []
     if body.context_slug is not None:
         new_ctx = await _load_context(session, user, body.context_slug)
@@ -164,8 +164,8 @@ async def delete_note(
 ) -> None:
     note = await _load_note(session, user, note_id)
     if note.deleted_at is None:
-        note.deleted_at = datetime.now(timezone.utc)
-        note.updated_at = note.deleted_at
+        note.deleted_at = datetime.now(UTC)
+        note.updated_at = note.deleted_at  # ty: ignore[invalid-assignment]
         await record_event(
             session,
             user_id=user.id,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -88,7 +88,7 @@ async def update_todo(
     session: AsyncSession = Depends(session_dependency),
 ) -> Todo:
     todo = await _load_todo(session, user, todo_id)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     events = []
     if body.context_slug is not None:
         new_ctx = await _load_context(session, user, body.context_slug)
@@ -128,8 +128,8 @@ async def delete_todo(
 ) -> None:
     todo = await _load_todo(session, user, todo_id)
     if todo.deleted_at is None:
-        todo.deleted_at = datetime.now(timezone.utc)
-        todo.updated_at = todo.deleted_at
+        todo.deleted_at = datetime.now(UTC)
+        todo.updated_at = todo.deleted_at  # ty: ignore[invalid-assignment]
         await record_event(
             session,
             user_id=user.id,
