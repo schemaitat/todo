@@ -11,7 +11,7 @@ name = "todo-mailer"
 path = "src/main.rs"
 
 [dependencies]
-todo-store = { path = "../todo-store" }
+todo-api-client = { path = "../todo-api-client" }
 anyhow.workspace = true
 chrono.workspace = true
 dotenvy = "0.15"
