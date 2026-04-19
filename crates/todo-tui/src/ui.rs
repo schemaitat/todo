@@ -2,7 +2,7 @@
 
 use crate::app::{App, InputTarget, Mode, Pane};
 use crate::editor::{EditorMode, VimEditor};
-use todo_store::EventKind;
+use todo_api_client::{Event as HistoryEvent, EventKind};
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -52,11 +52,11 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         " todo-tui ",
         Style::default().bg(ACCENT).fg(Color::Black).bold(),
     );
-    let counts = format!(
-        " todos:{}  notes:{} ",
-        app.store.todos.len(),
-        app.store.notes.len()
+    let ctx = Span::styled(
+        format!(" [{}] ", app.active_context.slug),
+        Style::default().bg(Color::Magenta).fg(Color::Black).bold(),
     );
+    let counts = format!(" todos:{}  notes:{} ", app.todos.len(), app.notes.len());
     let focus = match app.focus {
         Pane::Todos => " ◆ todos ",
         Pane::Notes => " ◆ notes ",
@@ -64,10 +64,19 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![
         title,
         Span::raw(" "),
+        ctx,
+        Span::raw(" "),
         Span::styled(counts, Style::default().fg(DIM)),
         Span::raw("  "),
         Span::styled(focus, Style::default().fg(ACCENT).bold()),
     ];
+    if app.offline {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            " offline ",
+            Style::default().bg(ERROR).fg(Color::Black).bold(),
+        ));
+    }
     if !app.filter.is_empty() {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
@@ -111,7 +120,7 @@ fn draw_todos(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = visible
         .iter()
         .map(|&i| {
-            let t = &app.store.todos[i];
+            let t = &app.todos[i];
             let mark = if t.done { "[x]" } else { "[ ]" };
             let mark_style = if t.done {
                 Style::default().fg(Color::Green)
@@ -131,7 +140,7 @@ fn draw_todos(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let block = pane_block("Todos", focused, visible.len(), app.store.todos.len());
+    let block = pane_block("Todos", focused, visible.len(), app.todos.len());
     let list = List::new(items)
         .block(block)
         .highlight_style(highlight_style(focused))
@@ -145,7 +154,7 @@ fn draw_todos(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 
     if visible.is_empty() {
-        let msg = if app.store.todos.is_empty() {
+        let msg = if app.todos.is_empty() {
             "no todos — press i to add"
         } else {
             "no matches"
@@ -160,7 +169,7 @@ fn draw_notes(f: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = visible
         .iter()
         .map(|&i| {
-            let n = &app.store.notes[i];
+            let n = &app.notes[i];
             ListItem::new(Line::from(vec![
                 Span::styled("● ", Style::default().fg(Color::Magenta)),
                 Span::styled(
@@ -171,7 +180,7 @@ fn draw_notes(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let block = pane_block("Notes", focused, visible.len(), app.store.notes.len());
+    let block = pane_block("Notes", focused, visible.len(), app.notes.len());
     let list = List::new(items)
         .block(block)
         .highlight_style(highlight_style(focused))
@@ -185,7 +194,7 @@ fn draw_notes(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 
     if visible.is_empty() {
-        let msg = if app.store.notes.is_empty() {
+        let msg = if app.notes.is_empty() {
             "no notes — press i to add"
         } else {
             "no matches"
@@ -251,8 +260,8 @@ fn draw_command(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     let hints = match app.mode {
-        Mode::Normal => "hjkl move/switch  i add  dd del  x done  / filter  Esc clear filter  : cmd  e edit-note  q quit",
-        Mode::Command => "Enter run  Esc cancel   commands: :todo :notes :new :delete :history :clear :w :q :help",
+        Mode::Normal => "hjkl move/switch  i add  dd del  x done  / filter  Esc clear  : cmd  e edit-note  q quit",
+        Mode::Command => "Enter run  Esc cancel   commands: :ctx :new :delete :history :reload :clear :q :help",
         Mode::Search => "type to filter both panes  Enter keep  Esc revert",
         Mode::Input => "Enter confirm  Esc cancel",
         Mode::NoteView => "Esc/Enter close  e edit",
@@ -298,7 +307,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_note_view(f: &mut Frame, app: &App, area: Rect) {
-    let Some(note) = app.store.notes.get(app.note_index) else {
+    let Some(note) = app.notes.get(app.note_index) else {
         return;
     };
     let popup = centered_rect_abs(80, 70, area);
@@ -326,7 +335,7 @@ fn draw_note_view(f: &mut Frame, app: &App, area: Rect) {
 fn draw_note_edit(f: &mut Frame, app: &App, area: Rect) {
     let title = app
         .editing_note_index
-        .and_then(|i| app.store.notes.get(i))
+        .and_then(|i| app.notes.get(i))
         .map(|n| n.title.clone())
         .unwrap_or_else(|| String::from("note"));
     let Some(editor) = app.note_editor.as_ref() else {
@@ -592,7 +601,7 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|e| {
             let ts = e.ts.format("%Y-%m-%d %H:%M:%S").to_string();
-            let (label, color, detail) = render_event_kind(&e.kind);
+            let (label, color, detail) = render_event(e);
             ListItem::new(Line::from(vec![
                 Span::styled(ts, Style::default().fg(DIM).bg(POPUP_BG)),
                 Span::styled("  ", popup_style()),
@@ -622,31 +631,59 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, popup, &mut state);
 }
 
-fn render_event_kind(kind: &EventKind) -> (&'static str, Color, String) {
-    match kind {
-        EventKind::TodoCreated { title, .. } => {
-            ("TODO CREATED", Color::Green, format!("\"{}\"", title))
-        }
-        EventKind::TodoRenamed { title, .. } => {
-            ("TODO RENAMED", Color::Yellow, format!("\"{}\"", title))
-        }
-        EventKind::TodoToggled { done, .. } => {
-            ("TODO TOGGLED", Color::Blue, format!("done={}", done))
-        }
-        EventKind::TodoDeleted { .. } => ("TODO DELETED", Color::Red, String::new()),
-        EventKind::NoteCreated { title, .. } => {
-            ("NOTE CREATED", Color::Green, format!("\"{}\"", title))
-        }
-        EventKind::NoteRenamed { title, .. } => {
-            ("NOTE RENAMED", Color::Yellow, format!("\"{}\"", title))
-        }
-        EventKind::NoteEdited { body, .. } => (
-            "NOTE EDITED",
-            Color::Blue,
-            format!("{} chars", body.chars().count()),
-        ),
-        EventKind::NoteDeleted { .. } => ("NOTE DELETED", Color::Red, String::new()),
+fn render_event(e: &HistoryEvent) -> (String, Color, String) {
+    if let Some(kind) = e.parsed_kind() {
+        return match kind {
+            EventKind::TodoCreated { title } => (
+                "TODO CREATED".to_string(),
+                Color::Green,
+                format!("\"{}\"", title),
+            ),
+            EventKind::TodoRenamed { title } => (
+                "TODO RENAMED".to_string(),
+                Color::Yellow,
+                format!("\"{}\"", title),
+            ),
+            EventKind::TodoToggled { done } => (
+                "TODO TOGGLED".to_string(),
+                Color::Blue,
+                format!("done={}", done),
+            ),
+            EventKind::TodoDeleted(_) => ("TODO DELETED".to_string(), Color::Red, String::new()),
+            EventKind::NoteCreated { title } => (
+                "NOTE CREATED".to_string(),
+                Color::Green,
+                format!("\"{}\"", title),
+            ),
+            EventKind::NoteRenamed { title } => (
+                "NOTE RENAMED".to_string(),
+                Color::Yellow,
+                format!("\"{}\"", title),
+            ),
+            EventKind::NoteEdited { length } => (
+                "NOTE EDITED".to_string(),
+                Color::Blue,
+                length.map(|n| format!("{} chars", n)).unwrap_or_default(),
+            ),
+            EventKind::NoteDeleted(_) => ("NOTE DELETED".to_string(), Color::Red, String::new()),
+            EventKind::ContextCreated { slug, name } => (
+                "CONTEXT CREATED".to_string(),
+                Color::Magenta,
+                format!("[{}] {}", slug, name),
+            ),
+            EventKind::ContextRenamed { slug, name } => (
+                "CONTEXT RENAMED".to_string(),
+                Color::Yellow,
+                format!("[{}] {}", slug, name),
+            ),
+            EventKind::ContextArchived { slug } => (
+                "CONTEXT ARCHIVED".to_string(),
+                Color::Red,
+                format!("[{}]", slug),
+            ),
+        };
     }
+    (e.kind.clone(), DIM, String::new())
 }
 
 fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {

@@ -1,11 +1,11 @@
 use crate::editor::{EditorExit, VimEditor};
 use crate::ui;
-use anyhow::Result;
-use chrono::Utc;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use anyhow::{anyhow, Result};
+use chrono::{DateTime, Utc};
+use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{backend::Backend, Terminal};
 use std::time::Duration;
-use todo_store::{self as storage, Event as HistoryEvent, EventKind, Note, Store, Todo};
+use todo_api_client::{ApiError, Client, Context, Event as HistoryEvent, Note, PatchedNote, Todo};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pane {
@@ -33,7 +33,11 @@ pub enum InputTarget {
 }
 
 pub struct App {
-    pub store: Store,
+    pub client: Client,
+    pub contexts: Vec<Context>,
+    pub active_context: Context,
+    pub todos: Vec<Todo>,
+    pub notes: Vec<Note>,
     pub focus: Pane,
     pub mode: Mode,
     pub todo_index: usize,
@@ -46,22 +50,49 @@ pub struct App {
     pub filter_backup: String,
     pub note_editor: Option<VimEditor>,
     pub editing_note_index: Option<usize>,
+    pub editing_note_version: Option<DateTime<Utc>>,
     pub history_events: Vec<HistoryEvent>,
     pub history_scroll: usize,
     pub should_quit: bool,
     pub pending_d: bool,
     pub pending_g: bool,
+    pub offline: bool,
 }
 
 impl App {
-    pub fn new(store: Store) -> Self {
-        Self {
-            store,
+    /// Build the app by fetching contexts and the active context's todos/notes from the API.
+    pub fn bootstrap(client: Client) -> Result<Self> {
+        let contexts = client.list_contexts()?;
+        if contexts.is_empty() {
+            return Err(anyhow!(
+                "no contexts on server — bootstrap the API first (it seeds an `inbox` context)"
+            ));
+        }
+        let active_slug = client.active_context_slug().to_string();
+        let active_context = contexts
+            .iter()
+            .find(|c| c.slug == active_slug)
+            .cloned()
+            .unwrap_or_else(|| contexts[0].clone());
+
+        let todos = client.list_todos(&active_context.slug)?;
+        let notes = client.list_notes(&active_context.slug)?;
+
+        let status = format!(
+            "welcome — context [{}]  :help for commands, :q to quit",
+            active_context.slug
+        );
+        let mut app = Self {
+            client,
+            contexts,
+            active_context,
+            todos,
+            notes,
             focus: Pane::Todos,
             mode: Mode::Normal,
             todo_index: 0,
             note_index: 0,
-            status: String::from("welcome — :help for commands, :q to quit"),
+            status,
             command_buffer: String::new(),
             input_buffer: String::new(),
             input_target: None,
@@ -69,26 +100,30 @@ impl App {
             filter_backup: String::new(),
             note_editor: None,
             editing_note_index: None,
+            editing_note_version: None,
             history_events: Vec::new(),
             history_scroll: 0,
             should_quit: false,
             pending_d: false,
             pending_g: false,
-        }
+            offline: false,
+        };
+        app.client.set_active_context(&app.active_context.slug);
+        app.snap_selection();
+        Ok(app)
     }
 
     pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
         loop {
             terminal.draw(|f| ui::draw(f, self))?;
             if event::poll(Duration::from_millis(200))? {
-                if let Event::Key(key) = event::read()? {
+                if let CEvent::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
                         self.handle_key(key)?;
                     }
                 }
             }
             if self.should_quit {
-                self.save();
                 break;
             }
         }
@@ -161,13 +196,13 @@ impl App {
             }
             KeyCode::Char('r') => match self.focus {
                 Pane::Todos => {
-                    if let Some(t) = self.store.todos.get(self.todo_index) {
+                    if let Some(t) = self.todos.get(self.todo_index) {
                         self.input_buffer = t.title.clone();
                         self.start_input_keep_buffer(InputTarget::RenameTodo);
                     }
                 }
                 Pane::Notes => {
-                    if let Some(n) = self.store.notes.get(self.note_index) {
+                    if let Some(n) = self.notes.get(self.note_index) {
                         self.input_buffer = n.title.clone();
                         self.start_input_keep_buffer(InputTarget::RenameNote);
                     }
@@ -317,25 +352,38 @@ impl App {
             }
         };
         let idx = self.editing_note_index.take();
+        let version = self.editing_note_version.take();
+
         match exit {
             EditorExit::Save => {
                 let body = editor.body();
-                let mut edited: Option<EventKind> = None;
-                if let Some(i) = idx {
-                    if let Some(note) = self.store.notes.get_mut(i) {
-                        note.body = body;
-                        note.updated_at = Utc::now();
-                        edited = Some(EventKind::NoteEdited {
-                            id: note.id,
-                            body: note.body.clone(),
-                        });
+                let Some(i) = idx else {
+                    self.mode = Mode::Normal;
+                    return;
+                };
+                let Some(note) = self.notes.get(i) else {
+                    self.mode = Mode::Normal;
+                    return;
+                };
+                let id = note.id;
+                if note.body == body {
+                    self.status = String::from("note unchanged");
+                    self.mode = Mode::Normal;
+                    return;
+                }
+                let patch = PatchedNote {
+                    body: Some(body),
+                    ..Default::default()
+                };
+                match self.client.patch_note(id, &patch, version) {
+                    Ok(updated) => {
+                        if let Some(slot) = self.notes.get_mut(i) {
+                            *slot = updated;
+                        }
+                        self.status = String::from("note saved");
                     }
+                    Err(e) => self.set_error_status(&e),
                 }
-                self.save();
-                if let Some(kind) = edited {
-                    self.log_event(kind);
-                }
-                self.status = String::from("note saved");
             }
             EditorExit::Cancel => {
                 self.status = String::from("edit cancelled");
@@ -353,10 +401,6 @@ impl App {
         let rest = parts.next().unwrap_or("").trim();
         match head {
             "q" | "quit" | "wq" | "x" => self.should_quit = true,
-            "w" | "write" => {
-                self.save();
-                self.status = String::from("saved");
-            }
             "todo" | "todos" => {
                 self.focus = Pane::Todos;
                 self.status = String::from("focus: todos");
@@ -384,6 +428,8 @@ impl App {
             "delete" | "rm" => self.delete_current(),
             "toggle" => self.toggle_done(),
             "history" | "hist" | "log" => self.open_history(),
+            "ctx" | "context" => self.run_ctx(rest),
+            "reload" | "sync" => self.reload_from_server(),
             "clear" | "nofilter" | "noh" | "nohlsearch" => {
                 self.filter.clear();
                 self.snap_selection();
@@ -391,12 +437,100 @@ impl App {
             }
             "help" | "h" => {
                 self.status = String::from(
-                    "keys: hjkl move/switch | i add | dd delete | x toggle | / filter | : cmd | e edit note | :history",
+                    "keys: hjkl move/switch | i add | dd delete | x toggle | / filter | :ctx <slug> | :history",
                 );
             }
             other => {
                 self.status = format!("unknown command: {}", other);
             }
+        }
+    }
+
+    fn run_ctx(&mut self, arg: &str) {
+        if arg.is_empty() {
+            let available: Vec<String> = self.contexts.iter().map(|c| c.slug.clone()).collect();
+            self.status = format!("contexts: [{}]", available.join(", "));
+            return;
+        }
+        let mut parts = arg.splitn(2, char::is_whitespace);
+        let first = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or("").trim();
+        if first == "new" {
+            self.create_context(rest);
+        } else {
+            self.switch_context(first);
+        }
+    }
+
+    fn create_context(&mut self, arg: &str) {
+        let mut parts = arg.splitn(2, char::is_whitespace);
+        let slug = parts.next().unwrap_or("").trim();
+        let name_raw = parts.next().unwrap_or("").trim();
+        if slug.is_empty() {
+            self.status = String::from("usage: :ctx new <slug> [name]");
+            return;
+        }
+        let name = if name_raw.is_empty() {
+            slug.to_string()
+        } else {
+            name_raw.to_string()
+        };
+        match self.client.create_context(slug, &name, None) {
+            Ok(ctx) => {
+                self.contexts.push(ctx.clone());
+                self.status = format!("created context [{}]", ctx.slug);
+                self.switch_context(&ctx.slug);
+            }
+            Err(e) => self.set_error_status(&e),
+        }
+    }
+
+    fn switch_context(&mut self, slug: &str) {
+        let Some(ctx) = self.contexts.iter().find(|c| c.slug == slug).cloned() else {
+            self.status = format!("no such context: {}", slug);
+            return;
+        };
+        let todos = self.client.list_todos(&ctx.slug);
+        let notes = self.client.list_notes(&ctx.slug);
+        match (todos, notes) {
+            (Ok(todos), Ok(notes)) => {
+                self.active_context = ctx.clone();
+                self.client.set_active_context(&ctx.slug);
+                self.todos = todos;
+                self.notes = notes;
+                self.todo_index = 0;
+                self.note_index = 0;
+                self.filter.clear();
+                self.history_events.clear();
+                self.offline = false;
+                self.status = format!("switched to [{}]", ctx.slug);
+            }
+            (Err(e), _) | (_, Err(e)) => self.set_error_status(&e),
+        }
+    }
+
+    fn reload_from_server(&mut self) {
+        match self.client.list_contexts() {
+            Ok(contexts) => {
+                self.contexts = contexts;
+            }
+            Err(e) => {
+                self.set_error_status(&e);
+                return;
+            }
+        }
+        let slug = self.active_context.slug.clone();
+        let todos = self.client.list_todos(&slug);
+        let notes = self.client.list_notes(&slug);
+        match (todos, notes) {
+            (Ok(todos), Ok(notes)) => {
+                self.todos = todos;
+                self.notes = notes;
+                self.offline = false;
+                self.snap_selection();
+                self.status = String::from("reloaded");
+            }
+            (Err(e), _) | (_, Err(e)) => self.set_error_status(&e),
         }
     }
 
@@ -408,60 +542,53 @@ impl App {
         }
         match target {
             InputTarget::NewTodo => {
-                let todo = Todo::new(value);
-                let event = EventKind::TodoCreated {
-                    id: todo.id,
-                    title: todo.title.clone(),
-                };
-                self.store.todos.push(todo);
-                self.todo_index = self.store.todos.len() - 1;
-                self.focus = Pane::Todos;
-                self.save();
-                self.log_event(event);
-                self.status = String::from("todo added");
+                match self.client.create_todo(&self.active_context.slug, &value) {
+                    Ok(todo) => {
+                        self.todos.push(todo);
+                        self.todo_index = self.todos.len().saturating_sub(1);
+                        self.focus = Pane::Todos;
+                        self.status = String::from("todo added");
+                    }
+                    Err(e) => self.set_error_status(&e),
+                }
             }
             InputTarget::NewNote => {
-                let note = Note::new(value);
-                let event = EventKind::NoteCreated {
-                    id: note.id,
-                    title: note.title.clone(),
-                };
-                self.store.notes.push(note);
-                self.note_index = self.store.notes.len() - 1;
-                self.focus = Pane::Notes;
-                self.save();
-                self.log_event(event);
-                self.status = String::from("note added");
+                match self.client.create_note(&self.active_context.slug, &value) {
+                    Ok(note) => {
+                        self.notes.push(note);
+                        self.note_index = self.notes.len().saturating_sub(1);
+                        self.focus = Pane::Notes;
+                        self.status = String::from("note added");
+                    }
+                    Err(e) => self.set_error_status(&e),
+                }
             }
             InputTarget::RenameTodo => {
-                let mut event = None;
-                if let Some(t) = self.store.todos.get_mut(self.todo_index) {
-                    t.title = value;
-                    event = Some(EventKind::TodoRenamed {
-                        id: t.id,
-                        title: t.title.clone(),
-                    });
-                }
-                if let Some(e) = event {
-                    self.save();
-                    self.log_event(e);
-                    self.status = String::from("todo renamed");
+                let Some(id) = self.todos.get(self.todo_index).map(|t| t.id) else {
+                    return;
+                };
+                match self.client.rename_todo(id, &value) {
+                    Ok(updated) => {
+                        if let Some(slot) = self.todos.get_mut(self.todo_index) {
+                            *slot = updated;
+                        }
+                        self.status = String::from("todo renamed");
+                    }
+                    Err(e) => self.set_error_status(&e),
                 }
             }
             InputTarget::RenameNote => {
-                let mut event = None;
-                if let Some(n) = self.store.notes.get_mut(self.note_index) {
-                    n.title = value;
-                    n.updated_at = Utc::now();
-                    event = Some(EventKind::NoteRenamed {
-                        id: n.id,
-                        title: n.title.clone(),
-                    });
-                }
-                if let Some(e) = event {
-                    self.save();
-                    self.log_event(e);
-                    self.status = String::from("note renamed");
+                let Some(id) = self.notes.get(self.note_index).map(|n| n.id) else {
+                    return;
+                };
+                match self.client.rename_note(id, &value) {
+                    Ok(updated) => {
+                        if let Some(slot) = self.notes.get_mut(self.note_index) {
+                            *slot = updated;
+                        }
+                        self.status = String::from("note renamed");
+                    }
+                    Err(e) => self.set_error_status(&e),
                 }
             }
         }
@@ -479,58 +606,61 @@ impl App {
     }
 
     fn delete_current(&mut self) {
-        let mut event = None;
         match self.focus {
             Pane::Todos => {
-                if let Some(t) = self.store.todos.get_mut(self.todo_index) {
-                    if t.deleted_at.is_none() {
-                        t.deleted_at = Some(Utc::now());
-                        event = Some((EventKind::TodoDeleted { id: t.id }, "todo deleted"));
+                let Some(id) = self.todos.get(self.todo_index).map(|t| t.id) else {
+                    return;
+                };
+                match self.client.delete_todo(id) {
+                    Ok(()) => {
+                        self.todos.remove(self.todo_index);
+                        self.snap_selection();
+                        self.status = String::from("todo deleted");
                     }
+                    Err(e) => self.set_error_status(&e),
                 }
             }
             Pane::Notes => {
-                if let Some(n) = self.store.notes.get_mut(self.note_index) {
-                    if n.deleted_at.is_none() {
-                        n.deleted_at = Some(Utc::now());
-                        event = Some((EventKind::NoteDeleted { id: n.id }, "note deleted"));
+                let Some(id) = self.notes.get(self.note_index).map(|n| n.id) else {
+                    return;
+                };
+                match self.client.delete_note(id) {
+                    Ok(()) => {
+                        self.notes.remove(self.note_index);
+                        self.snap_selection();
+                        self.status = String::from("note deleted");
                     }
+                    Err(e) => self.set_error_status(&e),
                 }
             }
-        }
-        if let Some((kind, msg)) = event {
-            self.save();
-            self.log_event(kind);
-            self.snap_selection();
-            self.status = String::from(msg);
         }
     }
 
     fn toggle_done(&mut self) {
-        let mut event = None;
-        if let Some(t) = self.store.todos.get_mut(self.todo_index) {
-            t.done = !t.done;
-            event = Some(EventKind::TodoToggled {
-                id: t.id,
-                done: t.done,
-            });
-        }
-        if let Some(e) = event {
-            self.save();
-            self.log_event(e);
+        let Some((id, next)) = self.todos.get(self.todo_index).map(|t| (t.id, !t.done)) else {
+            return;
+        };
+        match self.client.set_todo_done(id, next) {
+            Ok(updated) => {
+                if let Some(slot) = self.todos.get_mut(self.todo_index) {
+                    *slot = updated;
+                }
+            }
+            Err(e) => self.set_error_status(&e),
         }
     }
 
     fn open_note_view(&mut self) {
-        if self.store.notes.get(self.note_index).is_some() {
+        if self.notes.get(self.note_index).is_some() {
             self.mode = Mode::NoteView;
         }
     }
 
     fn open_note_edit(&mut self) {
-        if let Some(note) = self.store.notes.get(self.note_index) {
+        if let Some(note) = self.notes.get(self.note_index) {
             self.note_editor = Some(VimEditor::new(&note.body));
             self.editing_note_index = Some(self.note_index);
+            self.editing_note_version = Some(note.updated_at);
             self.mode = Mode::NoteEdit;
             self.status = String::from("editing note — :w save  :q cancel  i insert  Esc normal");
         }
@@ -563,8 +693,7 @@ impl App {
 
     pub fn visible_todo_indices(&self) -> Vec<usize> {
         let f = self.filter.to_lowercase();
-        self.store
-            .todos
+        self.todos
             .iter()
             .enumerate()
             .filter(|(_, t)| t.deleted_at.is_none())
@@ -575,8 +704,7 @@ impl App {
 
     pub fn visible_note_indices(&self) -> Vec<usize> {
         let f = self.filter.to_lowercase();
-        self.store
-            .notes
+        self.notes
             .iter()
             .enumerate()
             .filter(|(_, n)| n.deleted_at.is_none())
@@ -607,16 +735,11 @@ impl App {
         }
     }
 
-    fn save(&mut self) {
-        if let Err(e) = storage::save(&self.store) {
-            self.status = format!("save failed: {}", e);
+    fn set_error_status(&mut self, e: &ApiError) {
+        if e.is_network() {
+            self.offline = true;
         }
-    }
-
-    fn log_event(&mut self, kind: EventKind) {
-        if let Err(e) = storage::append_event(kind) {
-            self.status = format!("event log failed: {}", e);
-        }
+        self.status = e.status_line();
     }
 
     fn handle_history(&mut self, key: KeyEvent) -> Result<()> {
@@ -646,15 +769,16 @@ impl App {
     }
 
     fn open_history(&mut self) {
-        match storage::load_events() {
+        match self
+            .client
+            .list_events(Some(&self.active_context.slug), 200)
+        {
             Ok(events) => {
                 self.history_events = events;
-                self.history_scroll = self.history_events.len().saturating_sub(1);
+                self.history_scroll = 0;
                 self.mode = Mode::History;
             }
-            Err(e) => {
-                self.status = format!("history load failed: {}", e);
-            }
+            Err(e) => self.set_error_status(&e),
         }
     }
 }
