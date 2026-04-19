@@ -110,6 +110,12 @@ pub enum EventKind {
     ContextArchived {
         slug: String,
     },
+    TodoMoved {
+        to_slug: String,
+    },
+    NoteMoved {
+        to_slug: String,
+    },
 }
 
 /// Empty `{}` payload; kept as a separate type so `TodoDeleted` / `NoteDeleted` round-trip cleanly.

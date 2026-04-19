@@ -22,6 +22,8 @@ pub enum Mode {
     NoteView,
     NoteEdit,
     History,
+    ContextBrowser,
+    MovePicker,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -30,6 +32,7 @@ pub enum InputTarget {
     NewNote,
     RenameTodo,
     RenameNote,
+    NewContext,
 }
 
 pub struct App {
@@ -56,7 +59,14 @@ pub struct App {
     pub should_quit: bool,
     pub pending_d: bool,
     pub pending_g: bool,
+    pub pending_c: bool,
     pub offline: bool,
+    pub api_url: String,
+    pub context_index: usize,
+    pub suggestions: Vec<String>,
+    pub suggestion_index: usize,
+    pub move_source: Option<(Pane, usize)>,
+    pub move_picker_index: usize,
 }
 
 impl App {
@@ -82,6 +92,7 @@ impl App {
             "welcome — context [{}]  :help for commands, :q to quit",
             active_context.slug
         );
+        let api_url = client.base_url().trim_end_matches('/').to_string();
         let mut app = Self {
             client,
             contexts,
@@ -106,7 +117,14 @@ impl App {
             should_quit: false,
             pending_d: false,
             pending_g: false,
+            pending_c: false,
+            suggestions: Vec::new(),
+            suggestion_index: 0,
+            move_source: None,
+            move_picker_index: 0,
             offline: false,
+            api_url,
+            context_index: 0,
         };
         app.client.set_active_context(&app.active_context.slug);
         app.snap_selection();
@@ -139,12 +157,15 @@ impl App {
             Mode::NoteView => self.handle_note_view(key),
             Mode::NoteEdit => self.handle_note_edit(key),
             Mode::History => self.handle_history(key),
+            Mode::ContextBrowser => self.handle_context_browser(key),
+            Mode::MovePicker => self.handle_move_picker(key),
         }
     }
 
     fn handle_normal(&mut self, key: KeyEvent) -> Result<()> {
         let pending_d = std::mem::replace(&mut self.pending_d, false);
         let pending_g = std::mem::replace(&mut self.pending_g, false);
+        let pending_c = std::mem::replace(&mut self.pending_c, false);
 
         match key.code {
             KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => {
@@ -235,6 +256,19 @@ impl App {
                     Pane::Notes => Pane::Todos,
                 };
             }
+            KeyCode::Char('m') if key.modifiers == KeyModifiers::NONE => {
+                self.open_move_picker();
+            }
+            KeyCode::Char('c') if key.modifiers == KeyModifiers::NONE => {
+                if pending_c {
+                    self.cycle_context();
+                } else {
+                    self.pending_c = true;
+                }
+            }
+            KeyCode::Char('C') => {
+                self.open_context_browser();
+            }
             _ => {}
         }
         Ok(())
@@ -245,21 +279,106 @@ impl App {
             KeyCode::Esc => {
                 self.mode = Mode::Normal;
                 self.command_buffer.clear();
+                self.suggestions.clear();
+                self.suggestion_index = 0;
             }
             KeyCode::Enter => {
                 let cmd = std::mem::take(&mut self.command_buffer);
                 self.mode = Mode::Normal;
+                self.suggestions.clear();
+                self.suggestion_index = 0;
                 self.run_command(cmd.trim());
+            }
+            KeyCode::Tab => {
+                if !self.suggestions.is_empty() {
+                    self.command_buffer = self.suggestions[self.suggestion_index].clone();
+                    self.update_suggestions();
+                }
+            }
+            KeyCode::Up => {
+                if !self.suggestions.is_empty() {
+                    self.suggestion_index = if self.suggestion_index == 0 {
+                        self.suggestions.len() - 1
+                    } else {
+                        self.suggestion_index - 1
+                    };
+                }
+            }
+            KeyCode::Down => {
+                if !self.suggestions.is_empty() {
+                    self.suggestion_index = (self.suggestion_index + 1) % self.suggestions.len();
+                }
             }
             KeyCode::Backspace => {
                 self.command_buffer.pop();
+                self.update_suggestions();
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.command_buffer.push(c);
+                self.update_suggestions();
             }
             _ => {}
         }
         Ok(())
+    }
+
+    fn update_suggestions(&mut self) {
+        self.suggestions = self.compute_suggestions();
+        if self.suggestion_index >= self.suggestions.len() {
+            self.suggestion_index = 0;
+        }
+    }
+
+    fn compute_suggestions(&self) -> Vec<String> {
+        let buf = self.command_buffer.trim_start();
+        if buf.is_empty() {
+            return Vec::new();
+        }
+        let buf_lower = buf.to_lowercase();
+
+        let mut candidates: Vec<String> = vec![
+            "clear",
+            "context",
+            "ctx",
+            "ctx delete",
+            "ctx new",
+            "delete",
+            "h",
+            "help",
+            "hist",
+            "history",
+            "log",
+            "noh",
+            "nofilter",
+            "nohlsearch",
+            "note",
+            "notes",
+            "q",
+            "quit",
+            "reload",
+            "rm",
+            "sync",
+            "todo",
+            "todos",
+            "toggle",
+            "wq",
+            "x",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        for ctx in &self.contexts {
+            candidates.push(format!("ctx {}", ctx.slug));
+        }
+
+        let mut result: Vec<String> = candidates
+            .into_iter()
+            .filter(|c| c.starts_with(&buf_lower) && c.as_str() != buf_lower)
+            .collect();
+
+        result.sort_by_key(|s| s.len());
+        result
     }
 
     fn handle_search(&mut self, key: KeyEvent) -> Result<()> {
@@ -448,17 +567,16 @@ impl App {
 
     fn run_ctx(&mut self, arg: &str) {
         if arg.is_empty() {
-            let available: Vec<String> = self.contexts.iter().map(|c| c.slug.clone()).collect();
-            self.status = format!("contexts: [{}]", available.join(", "));
+            self.open_context_browser();
             return;
         }
         let mut parts = arg.splitn(2, char::is_whitespace);
         let first = parts.next().unwrap_or("");
         let rest = parts.next().unwrap_or("").trim();
-        if first == "new" {
-            self.create_context(rest);
-        } else {
-            self.switch_context(first);
+        match first {
+            "new" => self.create_context(rest),
+            "delete" | "rm" => self.archive_context(rest),
+            _ => self.switch_context(first),
         }
     }
 
@@ -587,6 +705,22 @@ impl App {
                             *slot = updated;
                         }
                         self.status = String::from("note renamed");
+                    }
+                    Err(e) => self.set_error_status(&e),
+                }
+            }
+            InputTarget::NewContext => {
+                let slug = value.trim().to_string();
+                if slug.is_empty() {
+                    self.status = String::from("cancelled (empty)");
+                    return;
+                }
+                match self.client.create_context(&slug, &slug, None) {
+                    Ok(ctx) => {
+                        self.contexts.push(ctx.clone());
+                        self.status = format!("created context [{}]", ctx.slug);
+                        self.switch_context(&ctx.slug);
+                        self.open_context_browser();
                     }
                     Err(e) => self.set_error_status(&e),
                 }
@@ -740,6 +874,184 @@ impl App {
             self.offline = true;
         }
         self.status = e.status_line();
+    }
+
+    fn cycle_context(&mut self) {
+        if self.contexts.len() < 2 {
+            self.status = String::from("only one context");
+            return;
+        }
+        let cur = self
+            .contexts
+            .iter()
+            .position(|c| c.slug == self.active_context.slug)
+            .unwrap_or(0);
+        let next = (cur + 1) % self.contexts.len();
+        let slug = self.contexts[next].slug.clone();
+        self.switch_context(&slug);
+    }
+
+    fn open_context_browser(&mut self) {
+        self.context_index = self
+            .contexts
+            .iter()
+            .position(|c| c.slug == self.active_context.slug)
+            .unwrap_or(0);
+        self.mode = Mode::ContextBrowser;
+    }
+
+    fn handle_context_browser(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.context_index + 1 < self.contexts.len() {
+                    self.context_index += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.context_index = self.context_index.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if let Some(ctx) = self.contexts.get(self.context_index).cloned() {
+                    let slug = ctx.slug.clone();
+                    self.mode = Mode::Normal;
+                    self.switch_context(&slug);
+                }
+            }
+            KeyCode::Char('n') => {
+                self.mode = Mode::Input;
+                self.input_buffer.clear();
+                self.input_target = Some(InputTarget::NewContext);
+            }
+            KeyCode::Char('d') => {
+                if let Some(ctx) = self.contexts.get(self.context_index).cloned() {
+                    if ctx.slug == self.active_context.slug {
+                        self.status = String::from("cannot delete the active context");
+                    } else {
+                        let slug = ctx.slug.clone();
+                        self.archive_context(&slug);
+                        self.context_index = self
+                            .context_index
+                            .min(self.contexts.len().saturating_sub(1));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn archive_context(&mut self, slug: &str) {
+        if slug.is_empty() {
+            self.status = String::from("usage: :ctx delete <slug>");
+            return;
+        }
+        if slug == self.active_context.slug {
+            self.status = String::from("cannot delete the active context");
+            return;
+        }
+        match self.client.archive_context(slug) {
+            Ok(()) => {
+                self.contexts.retain(|c| c.slug != slug);
+                self.status = format!("deleted context [{}]", slug);
+            }
+            Err(e) => self.set_error_status(&e),
+        }
+    }
+
+    fn open_move_picker(&mut self) {
+        let other_contexts: Vec<_> = self
+            .contexts
+            .iter()
+            .filter(|c| c.slug != self.active_context.slug)
+            .collect();
+        if other_contexts.is_empty() {
+            self.status = String::from("no other contexts to move to");
+            return;
+        }
+        self.move_source = Some((self.focus, self.current_index()));
+        self.move_picker_index = 0;
+        self.mode = Mode::MovePicker;
+    }
+
+    fn handle_move_picker(&mut self, key: KeyEvent) -> Result<()> {
+        let targets: Vec<String> = self
+            .contexts
+            .iter()
+            .filter(|c| c.slug != self.active_context.slug)
+            .map(|c| c.slug.clone())
+            .collect();
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
+                self.move_source = None;
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.move_picker_index + 1 < targets.len() {
+                    self.move_picker_index += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.move_picker_index = self.move_picker_index.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if let Some(slug) = targets.get(self.move_picker_index).cloned() {
+                    self.execute_move(&slug);
+                }
+                self.mode = Mode::Normal;
+                self.move_source = None;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn execute_move(&mut self, target_slug: &str) {
+        let Some((pane, idx)) = self.move_source else {
+            return;
+        };
+        let active_ctx_id = self.active_context.id;
+        match pane {
+            Pane::Todos => {
+                let Some(id) = self.todos.get(idx).map(|t| t.id) else {
+                    return;
+                };
+                let title = self.todos[idx].title.clone();
+                match self.client.move_todo(id, target_slug) {
+                    Ok(updated) if updated.context_id != active_ctx_id => {
+                        self.todos.remove(idx);
+                        self.snap_selection();
+                        self.status = format!("moved \"{}\" to [{}]", title, target_slug);
+                    }
+                    Ok(_) => {
+                        self.status =
+                            String::from("move failed: server did not accept context change");
+                    }
+                    Err(e) => self.set_error_status(&e),
+                }
+            }
+            Pane::Notes => {
+                let Some(id) = self.notes.get(idx).map(|n| n.id) else {
+                    return;
+                };
+                let title = self.notes[idx].title.clone();
+                match self.client.move_note(id, target_slug) {
+                    Ok(updated) if updated.context_id != active_ctx_id => {
+                        self.notes.remove(idx);
+                        self.snap_selection();
+                        self.status = format!("moved \"{}\" to [{}]", title, target_slug);
+                    }
+                    Ok(_) => {
+                        self.status =
+                            String::from("move failed: server did not accept context change");
+                    }
+                    Err(e) => self.set_error_status(&e),
+                }
+            }
+        }
     }
 
     fn handle_history(&mut self, key: KeyEvent) -> Result<()> {

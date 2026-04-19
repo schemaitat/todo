@@ -35,10 +35,16 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_command(f, app, chunks[2]);
     draw_help(f, app, chunks[3]);
 
+    if app.mode == Mode::Command && !app.suggestions.is_empty() {
+        draw_suggestions(f, app, chunks[2]);
+    }
+
     match app.mode {
         Mode::NoteView => draw_note_view(f, app, area),
         Mode::NoteEdit => draw_note_edit(f, app, area),
         Mode::History => draw_history(f, app, area),
+        Mode::ContextBrowser => draw_context_browser(f, app, area),
+        Mode::MovePicker => draw_move_picker(f, app, area),
         _ => {}
     }
 
@@ -70,6 +76,11 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Span::raw("  "),
         Span::styled(focus, Style::default().fg(ACCENT).bold()),
     ];
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        format!(" {} ", app.api_url),
+        Style::default().fg(DIM),
+    ));
     if app.offline {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
@@ -260,13 +271,15 @@ fn draw_command(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     let hints = match app.mode {
-        Mode::Normal => "hjkl move/switch  i add  dd del  x done  / filter  Esc clear  : cmd  e edit-note  q quit",
-        Mode::Command => "Enter run  Esc cancel   commands: :ctx :new :delete :history :reload :clear :q :help",
+        Mode::Normal => "hjkl move/switch  i add  dd del  x done  m move  / filter  cc cycle-ctx  C browser  Esc clear  : cmd  q quit",
+        Mode::Command => "Enter run  Esc cancel   :ctx [slug]  :ctx new <slug>  :ctx delete <slug>  :history  :q",
         Mode::Search => "type to filter both panes  Enter keep  Esc revert",
         Mode::Input => "Enter confirm  Esc cancel",
         Mode::NoteView => "Esc/Enter close  e edit",
         Mode::NoteEdit => "vim keys: hjkl move  i/a/o insert  dd del-line  yy p  u undo  v visual  :w save  :q cancel",
         Mode::History => "j/k scroll  gg/G top/bottom  Esc/q close",
+        Mode::ContextBrowser => "j/k navigate  Enter switch  n new  d delete  Esc close",
+        Mode::MovePicker => "j/k navigate  Enter move here  Esc cancel",
     };
     f.render_widget(
         Paragraph::new(Span::styled(hints, Style::default().fg(DIM))),
@@ -284,6 +297,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         Some(InputTarget::NewNote) => "New note",
         Some(InputTarget::RenameTodo) => "Rename todo",
         Some(InputTarget::RenameNote) => "Rename note",
+        Some(InputTarget::NewContext) => "New context (slug)",
         None => "Input",
     };
     let popup = centered_rect(60, 3, area);
@@ -681,9 +695,174 @@ fn render_event(e: &HistoryEvent) -> (String, Color, String) {
                 Color::Red,
                 format!("[{}]", slug),
             ),
+            EventKind::TodoMoved { to_slug } => (
+                "TODO MOVED".to_string(),
+                Color::Cyan,
+                format!("-> [{}]", to_slug),
+            ),
+            EventKind::NoteMoved { to_slug } => (
+                "NOTE MOVED".to_string(),
+                Color::Cyan,
+                format!("-> [{}]", to_slug),
+            ),
         };
     }
     (e.kind.clone(), DIM, String::new())
+}
+
+fn draw_suggestions(f: &mut Frame, app: &App, cmd_area: Rect) {
+    const MAX_VISIBLE: usize = 8;
+    let visible = app.suggestions.len().min(MAX_VISIBLE);
+    let height = visible as u16 + 2;
+
+    let width = (app.suggestions.iter().map(|s| s.len()).max().unwrap_or(10) as u16 + 4)
+        .max(24)
+        .min(cmd_area.width.saturating_sub(2));
+
+    let y = cmd_area.y.saturating_sub(height);
+    let x = (cmd_area.x + 2).min(cmd_area.width.saturating_sub(width));
+    let popup = Rect {
+        x,
+        y,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, popup);
+
+    let scroll_offset = if app.suggestion_index >= MAX_VISIBLE {
+        app.suggestion_index - MAX_VISIBLE + 1
+    } else {
+        0
+    };
+
+    let items: Vec<ListItem> = app
+        .suggestions
+        .iter()
+        .enumerate()
+        .skip(scroll_offset)
+        .take(MAX_VISIBLE)
+        .map(|(i, s)| {
+            let style = if i == app.suggestion_index {
+                Style::default()
+                    .bg(ACCENT)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                popup_style()
+            };
+            ListItem::new(Line::from(Span::styled(format!(" {} ", s), style)))
+        })
+        .collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(popup_style())
+        .border_style(Style::default().fg(DIM).bg(POPUP_BG));
+
+    f.render_widget(List::new(items).block(block).style(popup_style()), popup);
+}
+
+fn draw_move_picker(f: &mut Frame, app: &App, area: Rect) {
+    let targets: Vec<&str> = app
+        .contexts
+        .iter()
+        .filter(|c| c.slug != app.active_context.slug)
+        .map(|c| c.slug.as_str())
+        .collect();
+
+    let item_label = match app.move_source {
+        Some((Pane::Todos, idx)) => app.todos.get(idx).map(|t| t.title.as_str()).unwrap_or("?"),
+        Some((Pane::Notes, idx)) => app.notes.get(idx).map(|n| n.title.as_str()).unwrap_or("?"),
+        None => "?",
+    };
+
+    let popup = centered_rect(50, (targets.len() as u16 + 2).min(area.height), area);
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(popup_style())
+        .border_style(Style::default().fg(Color::Yellow).bg(POPUP_BG))
+        .title(Span::styled(
+            format!(" move \"{}\" to ", item_label),
+            Style::default().fg(Color::Yellow).bg(POPUP_BG).bold(),
+        ));
+
+    let items: Vec<ListItem> = targets
+        .iter()
+        .map(|slug| {
+            ListItem::new(Line::from(Span::styled(
+                format!("  {} ", slug),
+                popup_style(),
+            )))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .style(popup_style())
+        .highlight_style(
+            Style::default()
+                .bg(Color::Yellow)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    let mut state = ListState::default();
+    state.select(Some(
+        app.move_picker_index.min(targets.len().saturating_sub(1)),
+    ));
+    f.render_stateful_widget(list, popup, &mut state);
+}
+
+fn draw_context_browser(f: &mut Frame, app: &App, area: Rect) {
+    let popup = centered_rect(50, (app.contexts.len() as u16 + 2).min(area.height), area);
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(popup_style())
+        .border_style(Style::default().fg(Color::Magenta).bg(POPUP_BG))
+        .title(Span::styled(
+            format!(" contexts ({}) ", app.contexts.len()),
+            Style::default().fg(Color::Magenta).bg(POPUP_BG).bold(),
+        ));
+
+    let items: Vec<ListItem> = app
+        .contexts
+        .iter()
+        .map(|ctx| {
+            let is_active = ctx.slug == app.active_context.slug;
+            let marker = if is_active { "* " } else { "  " };
+            let style = if is_active {
+                Style::default().fg(Color::Magenta).bg(POPUP_BG).bold()
+            } else {
+                popup_style()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(marker, style),
+                Span::styled(ctx.slug.clone(), style),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .style(popup_style())
+        .highlight_style(
+            Style::default()
+                .bg(Color::Magenta)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    let mut state = ListState::default();
+    state.select(Some(
+        app.context_index.min(app.contexts.len().saturating_sub(1)),
+    ));
+    f.render_stateful_widget(list, popup, &mut state);
 }
 
 fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {

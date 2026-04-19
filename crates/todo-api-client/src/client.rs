@@ -59,6 +59,10 @@ impl Client {
         &self.context_slug
     }
 
+    pub fn base_url(&self) -> &str {
+        self.base.as_str()
+    }
+
     pub fn set_active_context(&mut self, slug: impl Into<String>) {
         self.context_slug = slug.into();
     }
@@ -110,6 +114,13 @@ impl Client {
         self.patch_json(["todos", &id.to_string()], &json!({ "done": done }))
     }
 
+    pub fn move_todo(&self, id: Uuid, context_slug: &str) -> ApiResult<Todo> {
+        self.patch_json(
+            ["todos", &id.to_string()],
+            &json!({ "context_slug": context_slug }),
+        )
+    }
+
     pub fn delete_todo(&self, id: Uuid) -> ApiResult<()> {
         self.delete(["todos", &id.to_string()])
     }
@@ -144,6 +155,13 @@ impl Client {
             builder = builder.header("If-Match", fmt);
         }
         Self::decode_json(send(builder)?)
+    }
+
+    pub fn move_note(&self, id: Uuid, context_slug: &str) -> ApiResult<Note> {
+        self.patch_json(
+            ["notes", &id.to_string()],
+            &json!({ "context_slug": context_slug }),
+        )
     }
 
     pub fn delete_note(&self, id: Uuid) -> ApiResult<()> {

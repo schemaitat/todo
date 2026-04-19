@@ -58,6 +58,7 @@ class TodoCreate(BaseModel):
 class TodoUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=1024)
     done: bool | None = None
+    context_slug: str | None = None
 
 
 class NoteOut(ORMBase):
@@ -78,6 +79,7 @@ class NoteCreate(BaseModel):
 class NoteUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=1024)
     body: str | None = None
+    context_slug: str | None = None
 
 
 class EventOut(ORMBase):

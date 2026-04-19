@@ -44,6 +44,8 @@ class EventKind(str, Enum):
     CONTEXT_CREATED = "ContextCreated"
     CONTEXT_RENAMED = "ContextRenamed"
     CONTEXT_ARCHIVED = "ContextArchived"
+    TODO_MOVED = "TodoMoved"
+    NOTE_MOVED = "NoteMoved"
 
 
 class User(Base):

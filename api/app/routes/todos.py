@@ -90,20 +90,26 @@ async def update_todo(
     todo = await _load_todo(session, user, todo_id)
     now = datetime.now(timezone.utc)
     events = []
+    if body.context_slug is not None:
+        new_ctx = await _load_context(session, user, body.context_slug)
+        if new_ctx.id != todo.context_id:
+            todo.context_id = new_ctx.id
+            todo.updated_at = now
+            events.append((todo.context_id, EventKind.TODO_MOVED, {"to_slug": body.context_slug}))
     if body.title is not None and body.title != todo.title:
         todo.title = body.title
         todo.updated_at = now
-        events.append((EventKind.TODO_RENAMED, {"title": todo.title}))
+        events.append((todo.context_id, EventKind.TODO_RENAMED, {"title": todo.title}))
     if body.done is not None and body.done != todo.done:
         todo.done = body.done
         todo.updated_at = now
-        events.append((EventKind.TODO_TOGGLED, {"done": todo.done}))
+        events.append((todo.context_id, EventKind.TODO_TOGGLED, {"done": todo.done}))
 
-    for kind, payload in events:
+    for context_id, kind, payload in events:
         await record_event(
             session,
             user_id=user.id,
-            context_id=todo.context_id,
+            context_id=context_id,
             entity_type="todo",
             entity_id=todo.id,
             kind=kind,

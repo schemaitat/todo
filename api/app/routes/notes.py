@@ -125,6 +125,12 @@ async def update_note(
 
     now = datetime.now(timezone.utc)
     events: list[tuple[EventKind, dict]] = []
+    if body.context_slug is not None:
+        new_ctx = await _load_context(session, user, body.context_slug)
+        if new_ctx.id != note.context_id:
+            note.context_id = new_ctx.id
+            note.updated_at = now
+            events.append((EventKind.NOTE_MOVED, {"to_slug": body.context_slug}))
     if body.title is not None and body.title != note.title:
         note.title = body.title
         events.append((EventKind.NOTE_RENAMED, {"title": note.title}))
