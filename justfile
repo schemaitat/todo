@@ -62,6 +62,10 @@ stack-down:
 n8n-up:
     just _compose --profile n8n up -d n8n
 
+n8n-import:
+    just _compose --profile n8n exec n8n n8n import:workflow --input=/workflows/snapshot.json
+    just _compose --profile n8n exec n8n n8n import:workflow --input=/workflows/email-ingest.json
+
 # --- One-shots -------------------------------------------------------------
 
 import-legacy *args:
