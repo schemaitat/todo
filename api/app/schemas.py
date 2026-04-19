@@ -38,7 +38,9 @@ class ContextUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     color: str | None = Field(default=None, max_length=16)
     position: int | None = None
-    slug: str | None = Field(default=None, min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]*$")
+    slug: str | None = Field(
+        default=None, min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9_-]*$"
+    )
 
 
 class TodoOut(ORMBase):
@@ -104,11 +106,16 @@ class SnapshotNoteOut(BaseModel):
     body: str
 
 
-class SnapshotJsonOut(BaseModel):
-    context: ContextOut
-    generated_at: datetime
+class SnapshotContextJsonOut(BaseModel):
+    slug: str
+    name: str
     open_todos: list[SnapshotTodoOut]
     notes: list[SnapshotNoteOut]
+
+
+class SnapshotJsonOut(BaseModel):
+    generated_at: datetime
+    contexts: list[SnapshotContextJsonOut]
 
 
 SnapshotFormat = Literal["plain", "html", "json"]

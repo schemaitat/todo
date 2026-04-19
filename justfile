@@ -26,26 +26,11 @@ test-rust:
 
 # --- Python API ------------------------------------------------------------
 
-api-sync:
-    cd api && uv venv --allow-existing --python 3.12 && uv pip install -e '.[dev]'
-
 api-dev:
     cd api && DATABASE_URL="${DATABASE_URL:-sqlite+aiosqlite:///./todo.db}" .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
-migrate *args:
-    cd api && .venv/bin/alembic {{args}}
-
-api-upgrade:
-    cd api && .venv/bin/alembic upgrade head
-
 test-api:
     cd api && .venv/bin/pytest -q
-
-lint-api:
-    cd api && .venv/bin/ruff check app tests scripts && .venv/bin/ruff format --check app tests scripts
-
-fmt-api:
-    cd api && .venv/bin/ruff format app tests scripts && .venv/bin/ruff check --fix app tests scripts
 
 # --- Deploy (compose) ------------------------------------------------------
 
@@ -64,36 +49,40 @@ stack-up:
 stack-down:
     just _compose down
 
-n8n-up:
-    just _compose --profile n8n up -d n8n
+automation-up:
+    just _compose up -d automation
 
-n8n-open:
-    #!/usr/bin/env bash
-    set -a && source .env && set +a
-    open "http://${SERVER##*@}:5678"
+automation-logs:
+    just _compose logs -f automation
 
-n8n-import:
-    just _compose --profile n8n exec n8n n8n import:workflow --input=/workflows/snapshot.json
-    just _compose --profile n8n exec n8n n8n import:workflow --input=/workflows/email-ingest.json
-
-n8n-import-remote:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    set -a && source .env && set +a
-    host="root@${SERVER##*@}"
-    ssh "$host" "cd /srv/todo/deploy && docker compose --env-file .env --profile n8n exec n8n n8n import:workflow --input=/workflows/snapshot.json"
-    ssh "$host" "cd /srv/todo/deploy && docker compose --env-file .env --profile n8n exec n8n n8n import:workflow --input=/workflows/email-ingest.json"
 
 # --- Remote deploy -----------------------------------------------------------
 # Usage: just deploy SERVER=user@host
 #        just stack-up-prod SERVER=user@host
 #        just ping-remote
 
+prefect-ui:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -a && source .env && set +a
+    host="root@${SERVER##*@}"
+    echo "Prefect UI → http://localhost:4200  (Ctrl-C to close tunnel)"
+    open http://localhost:4200
+    ssh -N -L 4200:localhost:4200 "$host"
+
+automation-run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -a && source .env && set +a
+    host="root@${SERVER##*@}"
+    ssh "$host" "docker exec -e PREFECT_API_URL=http://localhost:4200/api deploy-automation-1 prefect deployment run snapshot-email/snapshot-email"
+
 _server:
     #!/usr/bin/env bash
     set -a && source .env && set +a
     echo "root@${SERVER##*@}"  # strip any existing user prefix, force root
 
+# deploy code
 deploy:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -105,24 +94,28 @@ deploy:
         --exclude='target/' \
         --exclude='api/.venv' \
         --exclude='api/__pycache__' \
+        --exclude='automation/.venv' \
         --exclude='api/todo.db' \
         --exclude='.env' \
         . "$host":/srv/todo
     echo "Done."
 
+# deploy .env separately (don't want to risk overwriting any existing secrets on the server)
+deploy-env:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -a && source .env && set +a
+    host="root@${SERVER##*@}"
+    scp .env "$host":/srv/todo/.env
+    echo "Deployed .env to $host"
+
+# deploy and start stack on prod server
 stack-up-prod:
     #!/usr/bin/env bash
     set -euo pipefail
     set -a && source .env && set +a
     host="root@${SERVER##*@}"
-    ssh "$host" "cd /srv/todo/deploy && docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --build postgres api caddy"
-
-n8n-up-prod:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    set -a && source .env && set +a
-    host="root@${SERVER##*@}"
-    ssh "$host" "cd /srv/todo/deploy && docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env --profile n8n up -d n8n"
+    ssh "$host" "cd /srv/todo/deploy && docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --build postgres api caddy automation"
 
 ssh-remote:
     #!/usr/bin/env bash
@@ -138,8 +131,3 @@ ping-remote:
     echo ""
     echo "Listing contexts ..."
     curl -sf -H "X-API-Key: $TODO_API_KEY" "$TODO_API_URL/contexts" | python3 -m json.tool
-
-# --- One-shots -------------------------------------------------------------
-
-import-legacy *args:
-    cd api && .venv/bin/python scripts/import_legacy.py {{args}}

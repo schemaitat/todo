@@ -9,14 +9,8 @@ services:
     environment:
       ALLOWED_ORIGINS: "https://${DOMAIN}"
 
-  n8n:
+  automation:
     restart: unless-stopped
-    ports: []
-    profiles: ["n8n"]
-    environment:
-      N8N_HOST: "${N8N_SUBDOMAIN:-n8n}.${DOMAIN}"
-      N8N_PROTOCOL: "https"
-      WEBHOOK_URL: "https://${N8N_SUBDOMAIN:-n8n}.${DOMAIN}/"
 
   caddy:
     image: caddy:2-alpine
