@@ -1,0 +1,37 @@
+services:
+  postgres:
+    restart: unless-stopped
+    ports: []
+
+  api:
+    restart: unless-stopped
+    ports: []
+    environment:
+      ALLOWED_ORIGINS: "https://${DOMAIN}"
+
+  n8n:
+    restart: unless-stopped
+    ports: []
+    profiles: ["n8n"]
+    environment:
+      N8N_HOST: "${N8N_SUBDOMAIN:-n8n}.${DOMAIN}"
+      N8N_PROTOCOL: "https"
+      WEBHOOK_URL: "https://${N8N_SUBDOMAIN:-n8n}.${DOMAIN}/"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
+volumes:
+  caddy_data:
+  caddy_config:
