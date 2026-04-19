@@ -46,6 +46,8 @@ services:
       N8N_PERSONALIZATION_ENABLED: "false"
       N8N_DIAGNOSTICS_ENABLED: "false"
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      N8N_SECURE_COOKIE: "false"
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
       # Variables exposed to workflow expressions via $env.*
       TODO_API_URL: http://api:8000
       TODO_API_KEY: ${TODO_API_KEY}
