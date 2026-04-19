@@ -10,9 +10,9 @@
 | 3 | Domain endpoints (contexts, todos, notes, events, snapshot) + tests | ✓ Done |
 | 4 | Rust API client crate (`todo-api-client`) + wiremock tests | ✓ Done |
 | 5 | TUI refactor to use API client | ✓ Done |
-| 6 | Scheduled email snapshot: `/snapshot` endpoint done; n8n workflow JSON pending | ~ Partial |
-| 7 | Email ingest via n8n workflow | ○ Todo |
-| 8 | Legacy JSON data migration script | ○ Todo |
+| 6 | Scheduled email snapshot: `/snapshot` endpoint + n8n workflow JSON | ✓ Done |
+| 7 | Email ingest via n8n workflow | ✓ Done |
+| 8 | Legacy JSON data migration script | ✓ Done |
 | 9 | Auth evolution to OIDC/Keycloak | ○ Todo |
 | 10 | Deployment polish (observability, backups, prod compose): basic `docker-compose.yml` done | ~ Partial |
 
@@ -334,7 +334,7 @@ Acceptance: with `TODO_API_URL`, `TODO_API_KEY`, `TODO_CONTEXT` set and the
 API running, the TUI behaves exactly as today from the user's point of view,
 with the addition of `:ctx` commands.
 
-## 10. Phase 6 - scheduled email snapshots via n8n ~ PARTIAL
+## 10. Phase 6 - scheduled email snapshots via n8n ✓ DONE
 
 Today `todo-mailer` (`crates/todo-mailer/src/email.rs`) reads the local JSON
 and sends one email. Two options:
@@ -364,7 +364,7 @@ Steps for Option A:
    Remove the `email *args` recipe from the `justfile` (lives at
    `justfile:17`).
 
-## 11. Phase 7 - email ingest via n8n ○ TODO
+## 11. Phase 7 - email ingest via n8n ✓ DONE
 
 Goal: emailing `inbox-work@...` (or forwarding to a watched Gmail label)
 creates a todo or note in the right context.
@@ -389,7 +389,7 @@ Steps:
 Document the parsing rules in the repo README so the user remembers them
 next year.
 
-## 12. Phase 8 - migrate existing JSON data ○ TODO
+## 12. Phase 8 - migrate existing JSON data ✓ DONE
 
 The user has live data in
 `dirs::data_local_dir()/todo-tui/data.json` and

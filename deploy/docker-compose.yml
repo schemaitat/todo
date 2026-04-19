@@ -43,6 +43,11 @@ services:
       N8N_PORT: 5678
       WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}
       GENERIC_TIMEZONE: ${N8N_TIMEZONE:-UTC}
+      # Variables exposed to workflow expressions via $env.*
+      TODO_API_URL: http://api:8000
+      TODO_API_KEY: ${TODO_API_KEY}
+      TODO_CONTEXT: ${TODO_CONTEXT:-inbox}
+      TODO_SNAPSHOT_EMAIL: ${TODO_SNAPSHOT_EMAIL:-${BOOTSTRAP_USER_EMAIL:-a.schemaitat@gmail.com}}
     ports:
       - "5678:5678"
     volumes:
