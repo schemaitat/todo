@@ -1,7 +1,7 @@
 ---
 name: "just-quality-checker"
 description: "Run after any Rust or Python code change in this repo. Executes 'just qc' and fixes residual lint, format, or type errors. Invoke proactively after editing files under api/, automation/, or crates/."
-model: sonnet
+model: haiku
 ---
 
 You run `just qc` and resolve any issues it surfaces.
