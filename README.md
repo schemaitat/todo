@@ -12,18 +12,37 @@ Personal todo/notes system with a terminal UI, centralized API, and email automa
 | `todo-mailer` | `crates/todo-mailer` | Rust email helper library |
 | FastAPI service | `api/` | REST backend, Postgres via SQLAlchemy 2.x async |
 | Prefect automation | `automation/` | Scheduled daily snapshot email via SMTP |
+| Keycloak | `deploy/keycloak/` | OIDC provider (realm `todo`) for Bearer-token auth |
 | Postgres | Docker volume `pgdata` | Single source of truth |
 
 ## Architecture
 
 ```mermaid
 graph LR
-    TUI["todo-tui<br/>(Ratatui)"] -->|"HTTP · X-API-Key"| API["FastAPI<br/>(api/)"]
-    API <-->|"SQLAlchemy async"| PG[("Postgres")]
-    Automation["Prefect<br/>(automation/)"] -->|"HTTP · X-API-Key"| API
+    TUI["todo-tui<br/>(Ratatui)"] -->|"HTTPS · Bearer / X-API-Key"| Caddy
+    Browser["Browser<br/>(OIDC login)"] -->|HTTPS| Caddy
+
+    subgraph Edge["VPS edge"]
+        Caddy["Caddy<br/>(TLS · HTTP/3)"]
+    end
+
+    subgraph Internal["Docker network"]
+        API["FastAPI<br/>(api/)"]
+        KC["Keycloak<br/>(realm: todo)"]
+        PG[("Postgres")]
+        Automation["Prefect<br/>(automation/)"]
+    end
+
+    Caddy -->|"api.&lt;domain&gt; &rarr; api:8000"| API
+    Caddy -->|"auth.&lt;domain&gt; &rarr; keycloak:8080"| KC
+    API <-->|"SQLAlchemy async"| PG
+    KC <-->|JDBC| PG
+    API -->|"JWKS (RS256)"| KC
+    Automation -->|"HTTP · X-API-Key"| API
     Automation -->|SMTP| Mail["Email"]
-    Caddy["Caddy (TLS)"] -->|"reverse proxy"| API
 ```
+
+Caddy terminates TLS on the VPS (automatic certs via Let's Encrypt) and routes by host: `api.<domain>` &rarr; `api:8000`, `auth.<domain>` &rarr; `keycloak:8080`. The API and Keycloak containers never bind to public ports in production — only Caddy is exposed on 80/443 (plus UDP 443 for HTTP/3). See `deploy/Caddyfile` and `deploy/docker-compose.prod.yml`.
 
 ## How they connect
 
@@ -34,9 +53,10 @@ graph LR
 
 ## Authentication
 
-API requests are authenticated with a static `X-API-Key` header. The key is hashed (SHA-256 lookup + argon2 verify) and stored in the `api_keys` table — the plaintext is never persisted.
+The API accepts two credential types, checked in this order:
 
-The bootstrap key is generated once on first startup and printed to the API log. Set `BOOTSTRAP_API_KEY` in `.env` before first start to pin a known value.
+1. **`Authorization: Bearer <token>`** — OIDC access token from Keycloak (realm `todo`, RS256). Tokens are verified against the realm's JWKS endpoint and users are auto-provisioned on first sign-in (linked to an existing user by email when possible). Configure via `OIDC_ISSUER`, `OIDC_CLIENT_ID`, and optionally `OIDC_JWKS_URL` (internal URL for JWKS fetch, defaults to the issuer).
+2. **`X-API-Key: <key>`** — static API key for headless clients (Prefect automation, scripts). Keys are hashed (SHA-256 lookup + argon2 verify) and stored in the `api_keys` table; the plaintext is never persisted. The bootstrap key is generated once on first startup and printed to the API log — set `BOOTSTRAP_API_KEY` in `.env` before first start to pin a known value.
 
 For outbound email (snapshot), configure SMTP credentials in `.env` (`TODO_SMTP_USER`, `TODO_SMTP_PASS`). Gmail app passwords work out of the box with the default `smtp.gmail.com:587` settings.
 
@@ -47,22 +67,24 @@ For outbound email (snapshot), configure SMTP credentials in `.env` (`TODO_SMTP_
 - Docker + Docker Compose
 - Rust toolchain (`rustup`)
 - Python 3.12 + `uv`
-- `just` (`cargo install just` or `curl -LsSf https://just.systems/install.sh | bash -s -- --to ~/.local/bin`)
+- `just` (install via [uvx](https://uvx.sh/): `uv tool install rust-just`)
 
 ### First run (local development)
 
 ```bash
 # 1. copy and edit secrets
 cp deploy/.env.example .env   # fill in at minimum BOOTSTRAP_API_KEY and SMTP credentials
+# for OIDC sign-in also set OIDC_ISSUER, OIDC_CLIENT_ID, and (for prod) DOMAIN +
+# KEYCLOAK_ADMIN / KEYCLOAK_ADMIN_PASSWORD — see deploy/docker-compose.yml
 
 # 2. start Postgres + API (creates schema and seeds bootstrap user on first boot)
 just stack-up
 
 # 3. build and install the TUI
-just build
+just build-tui
 
-# 4. load env and launch
-source .env && todo-tui
+# 4. load env and launch (the binary is installed as `todo`)
+source .env && todo
 ```
 
 ### Remote deployment
@@ -81,19 +103,19 @@ This installs Docker, enables UFW with rules for SSH / 80 / 443 (including HTTP/
 
 ```bash
 # 1. push secrets to the server (do this before first deploy)
-just deploy-env SERVER=user@host
+just remote-deploy-env SERVER=user@host
 
 # 2. rsync code to the server
-just deploy SERVER=user@host
+just remote-deploy SERVER=user@host
 
 # 3. build images and start the full stack on the server
-just stack-up-prod SERVER=user@host
+just remote-stack-up SERVER=user@host
 
 # 4. verify the remote API
-just ping-remote SERVER=user@host
+just remote-ping SERVER=user@host
 
 # 5. open the Prefect UI via SSH tunnel (optional)
-just prefect-ui SERVER=user@host
+just remote-prefect-ui SERVER=user@host
 ```
 
 `SERVER` can also be set in `.env` so you can omit it from every command.
@@ -104,27 +126,33 @@ just prefect-ui SERVER=user@host
 # Docker / stack
 just stack-up          # start Postgres + API
 just stack-down        # stop everything
+just stack-logs        # tail all stack logs
+just db-up             # start only Postgres
 just automation-up     # start the Prefect automation container
+just automation-down   # stop the automation container
 just automation-logs   # tail automation logs
 
 # Development
-just api-dev           # local uvicorn with SQLite (no Docker needed)
-just tui               # run TUI from source (loads .env automatically)
+just dev-api                # local uvicorn with SQLite (no Docker needed)
+just dev-tui                # run TUI from source (loads .env automatically)
 
 # Quality checks
-just rs-qc             # rustfmt + clippy (Rust)
-just py-qc             # ruff format/lint + ty typecheck (Python)
+just qc                     # rs-qc + py-qc
+just rs-qc                  # rustfmt + clippy (Rust)
+just py-qc                  # ruff format/lint + ty typecheck (Python)
 
 # Tests
-just test-rust         # cargo test --workspace
-just test-api          # pytest
+just test                   # test-rs + test-py
+just test-rs                # cargo test --workspace
+just test-py                # pytest
 
 # Remote
-just deploy            # rsync code to server
-just deploy-env        # push .env to server
-just stack-up-prod     # build + start full prod stack on server
-just ping-remote       # health-check the remote API
-just ssh-remote        # open SSH shell on server
-just automation-run    # trigger snapshot email manually on server
-just prefect-ui        # open Prefect UI via SSH tunnel
+just remote-deploy          # rsync code to server
+just remote-deploy-env      # push .env to server
+just remote-stack-up        # build + start full prod stack on server
+just remote-stack-down      # stop the prod stack on server
+just remote-ping            # health-check the remote API
+just remote-ssh             # open SSH shell on server
+just remote-automation-run  # trigger snapshot email manually on server
+just remote-prefect-ui      # open Prefect UI via SSH tunnel
 ```
