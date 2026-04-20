@@ -1,7 +1,11 @@
+set dotenv-load := true
+
 default:
     @just --list
 
-# --- Rust ------------------------------------------------------------------
+# --- Quality ---------------------------------------------------------------
+
+qc: rs-qc py-qc
 
 rs-fmt:
     cargo fmt --all
@@ -11,44 +15,38 @@ rs-lint:
 
 rs-qc: rs-fmt rs-lint
 
-build:
-    cargo build --release
-    mkdir -p ~/.local/bin
-    install -m 755 target/release/todo-tui ~/.local/bin/todo
-
-tui:
-    #!/usr/bin/env bash
-    set -a && source .env && set +a
-    cargo run -p todo-tui
-
-test-rust:
-    cargo test --workspace
-
-# --- Python ----------------------------------------------------------------
-
 py-qc:
     uv run ruff format api automation
     uv run ruff check --fix api automation
     uv run ty check api/app automation/flows
 
-api-dev:
-    #!/usr/bin/env bash
-    set -a && source .env && set +a
-    DATABASE_URL="${DATABASE_URL:-sqlite+aiosqlite:///./api/todo.db}" uv run --directory api uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+test: test-rs test-py
 
-test-api:
+test-rs:
+    cargo test --workspace
+
+test-py:
     uv run --directory api pytest -q
 
-# --- Deploy (compose) ------------------------------------------------------
+# --- Dev -------------------------------------------------------------------
+
+dev-tui:
+    cargo run -p todo-tui
+
+dev-api:
+    DATABASE_URL="${DATABASE_URL:-sqlite+aiosqlite:///./api/todo.db}" uv run --directory api uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+# --- Build -----------------------------------------------------------------
+
+build-tui:
+    cargo build --release
+    mkdir -p ~/.local/bin
+    install -m 755 target/release/todo-tui ~/.local/bin/todo
+
+# --- Local stack (compose) -------------------------------------------------
 
 _compose *args:
     cd deploy && docker compose --env-file ../.env {{args}}
-
-db-up:
-    just _compose up -d postgres
-
-db-down:
-    just _compose down
 
 stack-up:
     just _compose up -d postgres api
@@ -56,44 +54,30 @@ stack-up:
 stack-down:
     just _compose down
 
+stack-logs:
+    just _compose logs -f
+
+db-up:
+    just _compose up -d postgres
+
 automation-up:
     just _compose up -d automation
+
+automation-down:
+    just _compose rm -sf automation
 
 automation-logs:
     just _compose logs -f automation
 
+# --- Remote ops ------------------------------------------------------------
+# Requires SERVER=user@host in .env (auto-loaded).
+# Usage: just remote-deploy
+#        just remote-stack-up
+#        just remote-ping
 
-# --- Remote deploy -----------------------------------------------------------
-# Usage: just deploy SERVER=user@host
-#        just stack-up-prod SERVER=user@host
-#        just ping-remote
-
-prefect-ui:
+remote-deploy:
     #!/usr/bin/env bash
     set -euo pipefail
-    set -a && source .env && set +a
-    host="root@${SERVER##*@}"
-    echo "Prefect UI → http://localhost:4200  (Ctrl-C to close tunnel)"
-    open http://localhost:4200
-    ssh -N -L 4200:localhost:4200 "$host"
-
-automation-run:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    set -a && source .env && set +a
-    host="root@${SERVER##*@}"
-    ssh "$host" "docker exec -e PREFECT_API_URL=http://localhost:4200/api deploy-automation-1 prefect deployment run snapshot-email/snapshot-email"
-
-_server:
-    #!/usr/bin/env bash
-    set -a && source .env && set +a
-    echo "root@${SERVER##*@}"  # strip any existing user prefix, force root
-
-# deploy code
-deploy:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    set -a && source .env && set +a
     host="root@${SERVER##*@}"
     echo "Syncing to $host:/srv/todo ..."
     rsync -az --delete \
@@ -106,34 +90,47 @@ deploy:
         . "$host":/srv/todo
     echo "Done."
 
-# deploy .env separately (don't want to risk overwriting any existing secrets on the server)
-deploy-env:
+remote-deploy-env:
     #!/usr/bin/env bash
     set -euo pipefail
-    set -a && source .env && set +a
     host="root@${SERVER##*@}"
     scp .env "$host":/srv/todo/.env
     echo "Deployed .env to $host"
 
-# deploy and start stack on prod server
-stack-up-prod:
+remote-stack-up:
     #!/usr/bin/env bash
     set -euo pipefail
-    set -a && source .env && set +a
     host="root@${SERVER##*@}"
     ssh "$host" "cd /srv/todo/deploy && docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --build postgres api caddy automation"
 
-ssh-remote:
-    #!/usr/bin/env bash
-    set -a && source .env && set +a
-    ssh "root@${SERVER##*@}"
-
-ping-remote:
+remote-stack-down:
     #!/usr/bin/env bash
     set -euo pipefail
-    set -a && source .env && set +a
+    host="root@${SERVER##*@}"
+    ssh "$host" "cd /srv/todo/deploy && docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env down"
+
+remote-ssh:
+    ssh "root@${SERVER##*@}"
+
+remote-ping:
+    #!/usr/bin/env bash
+    set -euo pipefail
     echo "Pinging $TODO_API_URL/health ..."
     curl -sf "$TODO_API_URL/health" | python3 -m json.tool
     echo ""
     echo "Listing contexts ..."
     curl -sf -H "X-API-Key: $TODO_API_KEY" "$TODO_API_URL/contexts" | python3 -m json.tool
+
+remote-prefect-ui:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    host="root@${SERVER##*@}"
+    echo "Prefect UI -> http://localhost:4200  (Ctrl-C to close tunnel)"
+    open http://localhost:4200
+    ssh -N -L 4200:localhost:4200 "$host"
+
+remote-automation-run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    host="root@${SERVER##*@}"
+    ssh "$host" "docker exec -e PREFECT_API_URL=http://localhost:4200/api deploy-automation-1 prefect deployment run snapshot-email/snapshot-email"
