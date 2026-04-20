@@ -19,6 +19,9 @@ class Settings(BaseSettings):
 
     oidc_issuer: str | None = Field(default=None)
     oidc_client_id: str | None = Field(default=None)
+    # Internal URL for JWKS fetch (e.g. http://keycloak:8080/realms/todo).
+    # Falls back to oidc_issuer when not set.
+    oidc_jwks_url: str | None = Field(default=None)
 
     version: str = Field(default="0.1.0")
     log_level: str = Field(default="INFO")

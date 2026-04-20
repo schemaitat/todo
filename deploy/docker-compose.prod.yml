@@ -7,7 +7,10 @@ services:
     restart: unless-stopped
     ports: []
     environment:
-      ALLOWED_ORIGINS: "https://${DOMAIN}"
+      ALLOWED_ORIGINS: "https://api.${DOMAIN}"
+    depends_on:
+      keycloak:
+        condition: service_healthy
 
   automation:
     restart: unless-stopped

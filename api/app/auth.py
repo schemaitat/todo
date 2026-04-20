@@ -89,8 +89,9 @@ async def resolve_api_key(session: AsyncSession, raw_key: str) -> User | None:
 
 
 @lru_cache(maxsize=1)
-def _jwks_client(issuer: str) -> PyJWKClient:
-    jwks_url = f"{issuer}/protocol/openid-connect/certs"
+def _jwks_client(issuer: str, jwks_base: str | None) -> PyJWKClient:
+    base = jwks_base or issuer
+    jwks_url = f"{base}/protocol/openid-connect/certs"
     return PyJWKClient(jwks_url, cache_jwk_set=True, lifespan=300)
 
 
@@ -100,39 +101,49 @@ async def resolve_bearer_token(session: AsyncSession, token: str) -> User | None
         return None
 
     try:
-        client = _jwks_client(settings.oidc_issuer)
+        client = _jwks_client(settings.oidc_issuer, settings.oidc_jwks_url)
         signing_key = client.get_signing_key_from_jwt(token)
         claims: dict[str, Any] = jwt.decode(
             token,
             signing_key.key,
             algorithms=["RS256"],
-            audience=settings.oidc_client_id,
             issuer=settings.oidc_issuer,
+            options={"verify_aud": False},
         )
-    except (PyJWKClientError, jwt.PyJWTError):
+    except (PyJWKClientError, jwt.PyJWTError) as exc:
+        import logging
+
+        logging.getLogger(__name__).warning("JWT validation failed: %s", exc)
         return None
 
-    sub: str = claims.get("sub", "")
+    # Use sub if present, fall back to email (Keycloak 26 omits sub from access tokens by default).
+    sub: str = claims.get("sub") or claims.get("email", "")
     if not sub:
         return None
+
+    email: str = claims.get("email", f"{sub}@oidc.local")
+    display_name: str = claims.get("name") or claims.get("preferred_username") or email
 
     user = (
         await session.execute(select(User).where(User.external_sub == sub))
     ).scalar_one_or_none()
 
-    if user is not None:
-        if user.disabled_at is not None:
-            return None
-        return user
+    if user is None:
+        # Link existing user by email (e.g. bootstrap user logging in via OIDC for first time).
+        user = (await session.execute(select(User).where(User.email == email))).scalar_one_or_none()
+        if user is not None:
+            await session.execute(update(User).where(User.id == user.id).values(external_sub=sub))
+            await session.commit()
 
-    # Auto-provision user from OIDC claims on first login.
-    email: str = claims.get("email", f"{sub}@oidc.local")
-    display_name: str = claims.get("name") or claims.get("preferred_username") or email
-    user = User(email=email, display_name=display_name, external_sub=sub)
-    session.add(user)
-    await session.flush()
-    session.add(Context(user_id=user.id, slug="inbox", name="inbox"))
-    await session.commit()
+    if user is None:
+        user = User(email=email, display_name=display_name, external_sub=sub)
+        session.add(user)
+        await session.flush()
+        session.add(Context(user_id=user.id, slug="inbox", name="inbox"))
+        await session.commit()
+
+    if user.disabled_at is not None:
+        return None
     return user
 
 
