@@ -12,7 +12,7 @@ use uuid::Uuid;
 use wiremock::matchers::{body_json, header_regex, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use todo_api_client::{ApiError, Client, Config, EventKind, PatchedNote};
+use todo_api_client::{ApiError, AuthConfig, Client, Config, EventKind, PatchedNote};
 
 fn runtime() -> Runtime {
     tokio::runtime::Builder::new_multi_thread()
@@ -25,8 +25,9 @@ fn runtime() -> Runtime {
 fn make_client(server: &MockServer) -> Client {
     Client::new(Config {
         base_url: server.uri(),
-        api_key: "todo_test_key".to_string(),
+        auth: AuthConfig::ApiKey("todo_test_key".to_string()),
         context_slug: "inbox".to_string(),
+        oidc: None,
     })
     .expect("client")
 }

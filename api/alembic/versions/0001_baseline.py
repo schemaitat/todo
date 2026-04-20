@@ -5,6 +5,7 @@ Revises:
 Create Date: 2026-04-18 00:00:00.000000
 
 """
+
 from __future__ import annotations
 
 import sqlalchemy as sa
@@ -23,17 +24,23 @@ def upgrade() -> None:
         sa.Column("email", sa.String(320), nullable=False, unique=True),
         sa.Column("display_name", sa.String(255), nullable=False),
         sa.Column("external_sub", sa.String(255), nullable=True, unique=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
         sa.Column("disabled_at", sa.DateTime(timezone=True), nullable=True),
     )
 
     op.create_table(
         "api_keys",
         sa.Column("id", sa.Uuid(), primary_key=True),
-        sa.Column("user_id", sa.Uuid(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "user_id", sa.Uuid(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        ),
         sa.Column("key_hash", sa.String(255), nullable=False, unique=True),
         sa.Column("label", sa.String(255), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
         sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
     )
@@ -42,12 +49,16 @@ def upgrade() -> None:
     op.create_table(
         "contexts",
         sa.Column("id", sa.Uuid(), primary_key=True),
-        sa.Column("user_id", sa.Uuid(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "user_id", sa.Uuid(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        ),
         sa.Column("slug", sa.String(64), nullable=False),
         sa.Column("name", sa.String(255), nullable=False),
         sa.Column("color", sa.String(16), nullable=False, server_default="#8888ff"),
         sa.Column("position", sa.Integer(), nullable=False, server_default="0"),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
         sa.Column("archived_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_index("ix_contexts_user_slug", "contexts", ["user_id", "slug"], unique=True)
@@ -55,11 +66,20 @@ def upgrade() -> None:
     op.create_table(
         "todos",
         sa.Column("id", sa.Uuid(), primary_key=True),
-        sa.Column("context_id", sa.Uuid(), sa.ForeignKey("contexts.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "context_id",
+            sa.Uuid(),
+            sa.ForeignKey("contexts.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("title", sa.String(1024), nullable=False),
         sa.Column("done", sa.Boolean(), nullable=False, server_default=sa.false()),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_index("ix_todos_context_deleted_done", "todos", ["context_id", "deleted_at", "done"])
@@ -67,11 +87,20 @@ def upgrade() -> None:
     op.create_table(
         "notes",
         sa.Column("id", sa.Uuid(), primary_key=True),
-        sa.Column("context_id", sa.Uuid(), sa.ForeignKey("contexts.id", ondelete="CASCADE"), nullable=False),
+        sa.Column(
+            "context_id",
+            sa.Uuid(),
+            sa.ForeignKey("contexts.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
         sa.Column("title", sa.String(1024), nullable=False),
         sa.Column("body", sa.Text(), nullable=False, server_default=""),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
     )
     op.create_index("ix_notes_context_deleted", "notes", ["context_id", "deleted_at"])
@@ -84,8 +113,15 @@ def upgrade() -> None:
             primary_key=True,
             autoincrement=True,
         ),
-        sa.Column("user_id", sa.Uuid(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("context_id", sa.Uuid(), sa.ForeignKey("contexts.id", ondelete="SET NULL"), nullable=True),
+        sa.Column(
+            "user_id", sa.Uuid(), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+        ),
+        sa.Column(
+            "context_id",
+            sa.Uuid(),
+            sa.ForeignKey("contexts.id", ondelete="SET NULL"),
+            nullable=True,
+        ),
         sa.Column("entity_type", sa.String(32), nullable=False),
         sa.Column("entity_id", sa.Uuid(), nullable=True),
         sa.Column("kind", sa.String(64), nullable=False),

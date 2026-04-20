@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use tempfile::TempDir;
-use todo_api_client::{ApiError, Config};
+use todo_api_client::{ApiError, AuthConfig, Config};
 
 // Env vars are process-global; serialize tests that mutate them.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -56,7 +56,7 @@ context_slug = "file-ctx"
     )
     .unwrap();
     assert_eq!(cfg.base_url, "http://env");
-    assert_eq!(cfg.api_key, "env-key");
+    assert!(matches!(cfg.auth, AuthConfig::ApiKey(ref k) if k == "env-key"));
     assert_eq!(cfg.context_slug, "env-ctx");
 }
 
@@ -76,7 +76,7 @@ api_key  = "file-key"
     .unwrap();
     let cfg = with_env(&[("TODO_CONFIG", cfg_path.to_str().unwrap())], Config::load).unwrap();
     assert_eq!(cfg.base_url, "http://file");
-    assert_eq!(cfg.api_key, "file-key");
+    assert!(matches!(cfg.auth, AuthConfig::ApiKey(ref k) if k == "file-key"));
     assert_eq!(cfg.context_slug, "inbox");
 }
 

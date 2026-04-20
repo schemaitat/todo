@@ -15,7 +15,7 @@ from .settings import get_settings
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):  # noqa: ARG001
+async def lifespan(app: FastAPI):
     configure_logging()
     log.info("startup.begin")
     db = get_database()

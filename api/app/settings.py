@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     bootstrap_api_key: str | None = Field(default=None)
     bootstrap_api_key_label: str = Field(default="bootstrap")
 
+    oidc_issuer: str | None = Field(default=None)
+    oidc_client_id: str | None = Field(default=None)
+
     version: str = Field(default="0.1.0")
     log_level: str = Field(default="INFO")
     log_json: bool = Field(default=True)

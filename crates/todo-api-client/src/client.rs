@@ -9,12 +9,11 @@ use serde_json::json;
 use url::Url;
 use uuid::Uuid;
 
-use crate::config::Config;
+use crate::config::{AuthConfig, Config};
 use crate::error::{ApiError, ApiResult};
 use todo_store::{Context, Event, Note, Todo};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
-const API_KEY_HEADER: &str = "X-API-Key";
 
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -39,10 +38,17 @@ impl Client {
 
     pub fn new(config: Config) -> ApiResult<Self> {
         let mut headers = HeaderMap::new();
-        let mut auth = HeaderValue::from_str(&config.api_key)
-            .map_err(|e| ApiError::Config(format!("invalid api key: {}", e)))?;
-        auth.set_sensitive(true);
-        headers.insert(API_KEY_HEADER, auth);
+        let (header_name, header_value) = match &config.auth {
+            AuthConfig::ApiKey(key) => ("X-API-Key", key.clone()),
+            AuthConfig::Bearer(token) => ("Authorization", format!("Bearer {token}")),
+            AuthConfig::OidcLoginRequired => {
+                return Err(ApiError::Config("OIDC login required".into()))
+            }
+        };
+        let mut hv = HeaderValue::from_str(&header_value)
+            .map_err(|e| ApiError::Config(format!("invalid auth header: {e}")))?;
+        hv.set_sensitive(true);
+        headers.insert(header_name, hv);
         let http = HttpClient::builder()
             .timeout(DEFAULT_TIMEOUT)
             .default_headers(headers)
@@ -53,6 +59,10 @@ impl Client {
             base,
             context_slug: config.context_slug,
         })
+    }
+
+    pub fn get_me(&self) -> ApiResult<todo_store::UserInfo> {
+        self.get_json::<todo_store::UserInfo>(["me"])
     }
 
     pub fn active_context_slug(&self) -> &str {

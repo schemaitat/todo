@@ -1,39 +1,41 @@
 # Tickets
 
-## T0001 — Gmail OAuth2 blocked on raw IP for remote n8n
+# T0001: postgres backup and persistence 
 
-**Status:** open  
-**Branch:** feat/remote-deploy
+Goal: Make sure we have versioned backups of our posgres data, index by 
+date. Each morning, a new backup should be created and stored on disc in a dedicated folder (e.g. `/srv/todo/pg_backups`).
 
-### Problem
+# T0002: Keycloak OIDC authentication [DONE]
 
-Google OAuth2 does not allow raw IP addresses as redirect URIs. When trying
-to authorize the Gmail credential in the remote n8n instance at
-`http://128.140.46.93:5678`, Google rejects the callback URL with:
+Replace the API key by OIDC using keycloak. The tui should implement `:auth login` and redirect to the keycloak login page. The tui should show the currently authenticated user.
 
-> Ungültige Weiterleitung: Muss mit einer öffentlichen Top-Level-Domain enden
+# T0003: python quality checks [DONE]
 
-### Context
+Similar as for the rust part, we use ruff and ty for quality checks. Implement a `just qc` command which runs the ruff linting and formatting with auto fixes. Then run `ty` as typecheker. 
 
-- Local n8n (localhost) works fine — Google allows `localhost` as a redirect URI
-- Remote n8n needs `http://<host>:5678/rest/oauth2-credential/callback` as an
-  authorized redirect URI in the Google Cloud Console OAuth client
-- This URI must use a registered domain, not a bare IP
+# T0004: Revise README and solve TODO's [DONE]
 
-### Resolution
+Solve all TODO's in the README, revise it to match current repo structure. Also add a section on the remote deployment.
 
-Set up a real domain (or free DuckDNS subdomain, e.g. `todo-andre.duckdns.org`)
-pointing to `128.140.46.93`, then:
+# T0005: Add the server setup to README and justfile
 
-1. Add `http://<domain>:5678/rest/oauth2-credential/callback` to the OAuth
-   client's authorized redirect URIs in Google Cloud Console
-2. Update `.env`:
-   ```
-   N8N_HOST=<domain>
-   N8N_WEBHOOK_URL=http://<domain>:5678/
-   ```
-3. Redeploy n8n: `just deploy && just n8n-up-prod` (or restart the n8n container)
-4. Re-create the Gmail OAuth2 credential in the remote n8n UI
+Make sure the setup-server.sh is idempotent and has strict firewall rules enabled. Revise the already existing script. Add a task to justfile and document in the README.
 
-Long-term: adding Caddy + TLS (Phase 10) gives a proper HTTPS domain and makes
-this a non-issue.
+# T0006: Review current API structure.
+
+Check if on slug deletion all corresponding notes and todos are deleted.
+
+# T0007: enhance the daily status email to also contain statistics 
+
+Add statistics like items (todos, notes) per slug and check if there are any orphaned todos or notes (i.e. not being attributed to any slug).
+
+# T0008: Harden Keycloak deployment security
+
+Several security shortcuts were taken to get OIDC working over plain HTTP. Fix before any production use:
+
+1. `sslRequired: none` in `deploy/keycloak/realm-todo.json` — disables HTTPS enforcement for the todo realm. Should be `"external"` once TLS is in place.
+2. Keycloak port 8080 exposed publicly — `docker-compose.yml` binds `8080:8080` so Keycloak admin UI and token endpoints are reachable from the internet. Should be restricted to `127.0.0.1` or routed through Caddy with TLS.
+3. Keycloak running in `start-dev` mode — not suitable for production. Switch to `start` with a proper PostgreSQL backend once the above are resolved.
+4. `KC_HOSTNAME_STRICT: false` and `KC_HTTP_ENABLED: true` added to allow external HTTP access. Remove once TLS is configured.
+
+Resolution path: configure a domain + TLS via Caddy (proxy `keycloak.{$DOMAIN}` → `keycloak:8080`), restore `sslRequired: external`, bind Keycloak back to `127.0.0.1`, and switch to `start` mode.

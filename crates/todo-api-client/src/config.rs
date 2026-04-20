@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::auth::{load_tokens, try_refresh};
 use crate::error::{ApiError, ApiResult};
 
 const ENV_URL: &str = "TODO_API_URL";
@@ -18,24 +19,43 @@ struct FileConfig {
     base_url: Option<String>,
     api_key: Option<String>,
     context_slug: Option<String>,
+    keycloak_url: Option<String>,
+    oidc_realm: Option<String>,
+    oidc_client_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum AuthConfig {
+    ApiKey(String),
+    Bearer(String),
+    /// OIDC is configured but no valid token is cached — login required.
+    OidcLoginRequired,
 }
 
 #[derive(Debug, Clone)]
 pub struct Config {
     pub base_url: String,
-    pub api_key: String,
+    pub auth: AuthConfig,
     pub context_slug: String,
+    /// OIDC settings, present when keycloak is configured.
+    pub oidc: Option<OidcConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OidcConfig {
+    pub keycloak_url: String,
+    pub realm: String,
+    pub client_id: String,
 }
 
 impl Config {
     /// Load config with precedence: env vars > `$TODO_CONFIG` or `~/.config/todo-tui/config.toml`
-    /// > built-in defaults (except `api_key`, which has no default and must be set somewhere).
+    /// > built-in defaults. Prefers a valid Bearer token (from saved tokens) over API key.
     pub fn load() -> ApiResult<Self> {
         let file = load_file_config(None)?;
         Self::resolve_with_file(file)
     }
 
-    /// Load explicitly from the given config file path (useful for tests).
     pub fn load_with_file(path: impl AsRef<Path>) -> ApiResult<Self> {
         let file = load_file_config(Some(path.as_ref()))?;
         Self::resolve_with_file(file)
@@ -44,23 +64,75 @@ impl Config {
     fn resolve_with_file(file: FileConfig) -> ApiResult<Self> {
         let base_url = env::var(ENV_URL)
             .ok()
-            .or(file.base_url)
+            .or_else(|| file.base_url.clone())
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
-        let api_key = env::var(ENV_KEY).ok().or(file.api_key).ok_or_else(|| {
-            ApiError::Config(format!(
-                "missing api key — set {} or write it to the config file",
-                ENV_KEY
-            ))
-        })?;
+
         let context_slug = env::var(ENV_CONTEXT)
             .ok()
-            .or(file.context_slug)
+            .or_else(|| file.context_slug.clone())
             .unwrap_or_else(|| DEFAULT_CONTEXT.to_string());
+
+        let oidc = resolve_oidc_config(&file);
+        let auth = resolve_auth(&file, oidc.as_ref())?;
+
         Ok(Self {
             base_url,
-            api_key,
+            auth,
             context_slug,
+            oidc,
         })
+    }
+}
+
+fn resolve_oidc_config(file: &FileConfig) -> Option<OidcConfig> {
+    let keycloak_url = env::var("TODO_KEYCLOAK_URL")
+        .ok()
+        .or_else(|| file.keycloak_url.clone())?;
+    let realm = env::var("TODO_OIDC_REALM")
+        .ok()
+        .or_else(|| file.oidc_realm.clone())
+        .unwrap_or_else(|| "todo".to_string());
+    let client_id = env::var("TODO_OIDC_CLIENT_ID")
+        .ok()
+        .or_else(|| file.oidc_client_id.clone())
+        .unwrap_or_else(|| "todo-tui".to_string());
+    Some(OidcConfig {
+        keycloak_url,
+        realm,
+        client_id,
+    })
+}
+
+fn resolve_auth(file: &FileConfig, oidc: Option<&OidcConfig>) -> ApiResult<AuthConfig> {
+    // When OIDC is configured, only Bearer tokens are accepted.
+    if let Some(oidc_cfg) = oidc {
+        if let Some(tokens) = load_tokens() {
+            if !tokens.is_expired() {
+                return Ok(AuthConfig::Bearer(tokens.access_token));
+            }
+            if let Some(rt) = &tokens.refresh_token {
+                if let Ok(refreshed) = try_refresh(
+                    &oidc_cfg.keycloak_url,
+                    &oidc_cfg.realm,
+                    &oidc_cfg.client_id,
+                    rt,
+                ) {
+                    if let Ok(()) = crate::auth::save_tokens(&refreshed) {
+                        return Ok(AuthConfig::Bearer(refreshed.access_token));
+                    }
+                }
+            }
+        }
+        return Ok(AuthConfig::OidcLoginRequired);
+    }
+
+    // No OIDC — fall back to API key.
+    let api_key = env::var(ENV_KEY).ok().or_else(|| file.api_key.clone());
+    match api_key {
+        Some(k) => Ok(AuthConfig::ApiKey(k)),
+        None => Err(ApiError::Config(format!(
+            "no valid auth: set {ENV_KEY}, or run ':auth login' in the TUI"
+        ))),
     }
 }
 

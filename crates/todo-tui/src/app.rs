@@ -5,7 +5,10 @@ use chrono::{DateTime, Utc};
 use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{backend::Backend, Terminal};
 use std::time::Duration;
-use todo_api_client::{ApiError, Client, Context, Event as HistoryEvent, Note, PatchedNote, Todo};
+use todo_api_client::{
+    auth, ApiError, AuthConfig, Client, Config, Context, Event as HistoryEvent, Note, PatchedNote,
+    Todo,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pane {
@@ -37,6 +40,7 @@ pub enum InputTarget {
 
 pub struct App {
     pub client: Client,
+    pub config: Config,
     pub contexts: Vec<Context>,
     pub active_context: Context,
     pub todos: Vec<Todo>,
@@ -67,11 +71,13 @@ pub struct App {
     pub suggestion_index: usize,
     pub move_source: Option<(Pane, usize)>,
     pub move_picker_index: usize,
+    pub current_user: Option<String>,
 }
 
 impl App {
     /// Build the app by fetching contexts and the active context's todos/notes from the API.
-    pub fn bootstrap(client: Client) -> Result<Self> {
+    pub fn bootstrap(config: Config) -> Result<Self> {
+        let client = Client::new(config.clone()).map_err(|e| anyhow!("{}", e.status_line()))?;
         let contexts = client.list_contexts()?;
         if contexts.is_empty() {
             return Err(anyhow!(
@@ -87,6 +93,7 @@ impl App {
 
         let todos = client.list_todos(&active_context.slug)?;
         let notes = client.list_notes(&active_context.slug)?;
+        let current_user = client.get_me().ok().map(|u| u.display_name);
 
         let status = format!(
             "welcome — context [{}]  :help for commands, :q to quit",
@@ -95,6 +102,7 @@ impl App {
         let api_url = client.base_url().trim_end_matches('/').to_string();
         let mut app = Self {
             client,
+            config,
             contexts,
             active_context,
             todos,
@@ -125,6 +133,7 @@ impl App {
             offline: false,
             api_url,
             context_index: 0,
+            current_user,
         };
         app.client.set_active_context(&app.active_context.slug);
         app.snap_selection();
@@ -337,6 +346,9 @@ impl App {
         let buf_lower = buf.to_lowercase();
 
         let mut candidates: Vec<String> = vec![
+            "auth login",
+            "auth logout",
+            "auth status",
             "clear",
             "context",
             "ctx",
@@ -519,6 +531,7 @@ impl App {
         let head = parts.next().unwrap_or("");
         let rest = parts.next().unwrap_or("").trim();
         match head {
+            "auth" => self.run_auth(rest),
             "q" | "quit" | "wq" | "x" => self.should_quit = true,
             "todo" | "todos" => {
                 self.focus = Pane::Todos;
@@ -563,6 +576,64 @@ impl App {
                 self.status = format!("unknown command: {}", other);
             }
         }
+    }
+
+    fn run_auth(&mut self, arg: &str) {
+        match arg {
+            "login" => self.do_oidc_login(),
+            "logout" => self.do_oidc_logout(),
+            "status" => {
+                self.status = match &self.current_user {
+                    Some(name) => format!("logged in as: {name}"),
+                    None => String::from("not logged in via OIDC (using API key)"),
+                };
+            }
+            _ => self.status = String::from("usage: :auth login | :auth logout | :auth status"),
+        }
+    }
+
+    fn do_oidc_login(&mut self) {
+        let oidc = match &self.config.oidc {
+            Some(o) => o.clone(),
+            None => {
+                self.status =
+                    String::from("OIDC not configured — set TODO_KEYCLOAK_URL in env or config");
+                return;
+            }
+        };
+        self.status = String::from("opening browser for login...");
+        match auth::login_interactive(&oidc.keycloak_url, &oidc.realm, &oidc.client_id) {
+            Ok(tokens) => {
+                if let Err(e) = auth::save_tokens(&tokens) {
+                    self.status = format!("login ok but could not save tokens: {e}");
+                    return;
+                }
+                // Rebuild client with the new Bearer token.
+                let new_config = Config {
+                    auth: AuthConfig::Bearer(tokens.access_token),
+                    ..self.config.clone()
+                };
+                match Client::new(new_config.clone()) {
+                    Ok(client) => {
+                        self.config = new_config;
+                        self.client = client;
+                        self.current_user = self.client.get_me().ok().map(|u| u.display_name);
+                        self.status = match &self.current_user {
+                            Some(n) => format!("logged in as: {n}"),
+                            None => String::from("login successful"),
+                        };
+                    }
+                    Err(e) => self.status = format!("login ok but client error: {e}"),
+                }
+            }
+            Err(e) => self.status = format!("login failed: {e}"),
+        }
+    }
+
+    fn do_oidc_logout(&mut self) {
+        auth::clear_tokens();
+        self.current_user = None;
+        self.status = String::from("logged out — restart TUI or set TODO_API_KEY to continue");
     }
 
     fn run_ctx(&mut self, arg: &str) {

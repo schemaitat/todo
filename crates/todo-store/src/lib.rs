@@ -122,6 +122,15 @@ pub enum EventKind {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EmptyPayload {}
 
+/// Mirrors `UserOut` from the FastAPI `/me` endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserInfo {
+    pub id: Uuid,
+    pub email: String,
+    pub display_name: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

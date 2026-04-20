@@ -81,6 +81,13 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         format!(" {} ", app.api_url),
         Style::default().fg(DIM),
     ));
+    if let Some(ref user) = app.current_user {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!(" {user} "),
+            Style::default().fg(Color::Green).bold(),
+        ));
+    }
     if app.offline {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(

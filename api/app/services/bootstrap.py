@@ -15,7 +15,9 @@ async def ensure_bootstrap(session: AsyncSession) -> None:
     if existing_users > 0:
         return
 
-    user = User(email=settings.bootstrap_user_email, display_name=settings.bootstrap_user_display_name)
+    user = User(
+        email=settings.bootstrap_user_email, display_name=settings.bootstrap_user_display_name
+    )
     session.add(user)
     await session.flush()
 

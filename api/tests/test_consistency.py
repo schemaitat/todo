@@ -8,10 +8,9 @@ from httpx import AsyncClient
 async def test_each_mutation_produces_one_event(api: tuple[AsyncClient, str]) -> None:
     client, _ = api
 
-    from sqlalchemy import func, select
-
     from app.db import get_database
     from app.models import Event
+    from sqlalchemy import func, select
 
     db = get_database()
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
@@ -32,7 +32,11 @@ async def list_contexts(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(session_dependency),
 ) -> list[Context]:
-    stmt = select(Context).where(Context.user_id == user.id).order_by(Context.position, Context.created_at)
+    stmt = (
+        select(Context)
+        .where(Context.user_id == user.id)
+        .order_by(Context.position, Context.created_at)
+    )
     if not include_archived:
         stmt = stmt.where(Context.archived_at.is_(None))
     return list((await session.execute(stmt)).scalars())
@@ -45,10 +49,14 @@ async def create_context(
     session: AsyncSession = Depends(session_dependency),
 ) -> Context:
     existing_count = (
-        await session.execute(
-            select(Context).where(Context.user_id == user.id).order_by(Context.position.desc())
+        (
+            await session.execute(
+                select(Context).where(Context.user_id == user.id).order_by(Context.position.desc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     next_position = (existing_count[0].position + 1) if existing_count else 0
 
     ctx = Context(
@@ -63,7 +71,9 @@ async def create_context(
         await session.flush()
     except IntegrityError as e:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="slug already exists") from e
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="slug already exists"
+        ) from e
     await record_event(
         session,
         user_id=user.id,
@@ -113,7 +123,9 @@ async def update_context(
         await session.commit()
     except IntegrityError as e:
         await session.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="slug already exists") from e
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="slug already exists"
+        ) from e
     await session.refresh(ctx)
     return ctx
 
@@ -130,7 +142,7 @@ async def archive_context(
         )
     ctx = await _load_context(session, user, slug)
     if ctx.archived_at is None:
-        ctx.archived_at = datetime.now(timezone.utc)
+        ctx.archived_at = datetime.now(UTC)
         await record_event(
             session,
             user_id=user.id,
