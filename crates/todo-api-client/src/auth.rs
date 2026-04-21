@@ -60,6 +60,34 @@ pub fn clear_tokens() {
     }
 }
 
+/// Revoke the refresh token at Keycloak's end_session endpoint so the server-side
+/// session and refresh token are invalidated. Best-effort: errors are ignored because
+/// we still want local credentials cleared regardless.
+pub fn revoke_refresh_token(keycloak_url: &str, realm: &str, client_id: &str, refresh_token: &str) {
+    let logout_url = format!("{keycloak_url}/realms/{realm}/protocol/openid-connect/logout");
+    let mut params = HashMap::new();
+    params.insert("client_id", client_id);
+    params.insert("refresh_token", refresh_token);
+
+    let Ok(http) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    else {
+        return;
+    };
+    let _ = http.post(&logout_url).form(&params).send();
+}
+
+/// Full logout: revoke refresh token at Keycloak (if present) and delete saved tokens.
+pub fn logout(keycloak_url: &str, realm: &str, client_id: &str) {
+    if let Some(tokens) = load_tokens() {
+        if let Some(rt) = tokens.refresh_token.as_deref() {
+            revoke_refresh_token(keycloak_url, realm, client_id, rt);
+        }
+    }
+    clear_tokens();
+}
+
 fn tokens_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("todo-tui").join("tokens.json"))
 }

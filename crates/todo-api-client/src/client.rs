@@ -38,17 +38,17 @@ impl Client {
 
     pub fn new(config: Config) -> ApiResult<Self> {
         let mut headers = HeaderMap::new();
-        let (header_name, header_value) = match &config.auth {
-            AuthConfig::ApiKey(key) => ("X-API-Key", key.clone()),
-            AuthConfig::Bearer(token) => ("Authorization", format!("Bearer {token}")),
-            AuthConfig::OidcLoginRequired => {
-                return Err(ApiError::Config("OIDC login required".into()))
-            }
+        let auth_header = match &config.auth {
+            AuthConfig::ApiKey(key) => Some(("X-API-Key", key.clone())),
+            AuthConfig::Bearer(token) => Some(("Authorization", format!("Bearer {token}"))),
+            AuthConfig::OidcLoginRequired => None,
         };
-        let mut hv = HeaderValue::from_str(&header_value)
-            .map_err(|e| ApiError::Config(format!("invalid auth header: {e}")))?;
-        hv.set_sensitive(true);
-        headers.insert(header_name, hv);
+        if let Some((header_name, header_value)) = auth_header {
+            let mut hv = HeaderValue::from_str(&header_value)
+                .map_err(|e| ApiError::Config(format!("invalid auth header: {e}")))?;
+            hv.set_sensitive(true);
+            headers.insert(header_name, hv);
+        }
         let http = HttpClient::builder()
             .timeout(DEFAULT_TIMEOUT)
             .default_headers(headers)

@@ -93,7 +93,7 @@ impl App {
 
         let todos = client.list_todos(&active_context.slug)?;
         let notes = client.list_notes(&active_context.slug)?;
-        let current_user = client.get_me().ok().map(|u| u.display_name);
+        let current_user = client.get_me().ok().map(|u| u.email);
 
         let status = format!(
             "welcome — context [{}]  :help for commands, :q to quit",
@@ -617,7 +617,7 @@ impl App {
                     Ok(client) => {
                         self.config = new_config;
                         self.client = client;
-                        self.current_user = self.client.get_me().ok().map(|u| u.display_name);
+                        self.current_user = self.client.get_me().ok().map(|u| u.email);
                         self.status = match &self.current_user {
                             Some(n) => format!("logged in as: {n}"),
                             None => String::from("login successful"),
@@ -631,9 +631,21 @@ impl App {
     }
 
     fn do_oidc_logout(&mut self) {
-        auth::clear_tokens();
+        if let Some(oidc) = &self.config.oidc {
+            auth::logout(&oidc.keycloak_url, &oidc.realm, &oidc.client_id);
+        } else {
+            auth::clear_tokens();
+        }
+        let new_config = Config {
+            auth: AuthConfig::OidcLoginRequired,
+            ..self.config.clone()
+        };
+        if let Ok(client) = Client::new(new_config.clone()) {
+            self.config = new_config;
+            self.client = client;
+        }
         self.current_user = None;
-        self.status = String::from("logged out — restart TUI or set TODO_API_KEY to continue");
+        self.status = String::from("logged out — run :auth login to sign in again");
     }
 
     fn run_ctx(&mut self, arg: &str) {
