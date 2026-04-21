@@ -62,13 +62,11 @@ impl Config {
     }
 
     fn resolve_with_file(file: FileConfig) -> ApiResult<Self> {
-        let base_url = env::var(ENV_URL)
-            .ok()
+        let base_url = env_var_nonempty(ENV_URL)
             .or_else(|| file.base_url.clone())
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
-        let context_slug = env::var(ENV_CONTEXT)
-            .ok()
+        let context_slug = env_var_nonempty(ENV_CONTEXT)
             .or_else(|| file.context_slug.clone())
             .unwrap_or_else(|| DEFAULT_CONTEXT.to_string());
 
@@ -85,15 +83,12 @@ impl Config {
 }
 
 fn resolve_oidc_config(file: &FileConfig) -> Option<OidcConfig> {
-    let keycloak_url = env::var("TODO_KEYCLOAK_URL")
-        .ok()
-        .or_else(|| file.keycloak_url.clone())?;
-    let realm = env::var("TODO_OIDC_REALM")
-        .ok()
+    let keycloak_url =
+        env_var_nonempty("TODO_KEYCLOAK_URL").or_else(|| file.keycloak_url.clone())?;
+    let realm = env_var_nonempty("TODO_OIDC_REALM")
         .or_else(|| file.oidc_realm.clone())
         .unwrap_or_else(|| "todo".to_string());
-    let client_id = env::var("TODO_OIDC_CLIENT_ID")
-        .ok()
+    let client_id = env_var_nonempty("TODO_OIDC_CLIENT_ID")
         .or_else(|| file.oidc_client_id.clone())
         .unwrap_or_else(|| "todo-tui".to_string());
     Some(OidcConfig {
@@ -127,7 +122,7 @@ fn resolve_auth(file: &FileConfig, oidc: Option<&OidcConfig>) -> ApiResult<AuthC
     }
 
     // No OIDC — fall back to API key.
-    let api_key = env::var(ENV_KEY).ok().or_else(|| file.api_key.clone());
+    let api_key = env_var_nonempty(ENV_KEY).or_else(|| file.api_key.clone());
     match api_key {
         Some(k) => Ok(AuthConfig::ApiKey(k)),
         None => Err(ApiError::Config(format!(
@@ -154,6 +149,10 @@ fn load_file_config(explicit_path: Option<&Path>) -> ApiResult<FileConfig> {
 
 fn config_path_from_env() -> Option<PathBuf> {
     env::var_os(ENV_CONFIG_PATH).map(PathBuf::from)
+}
+
+fn env_var_nonempty(key: &str) -> Option<String> {
+    env::var(key).ok().filter(|v| !v.is_empty())
 }
 
 fn default_config_path() -> Option<PathBuf> {
