@@ -101,13 +101,13 @@ remote-stack-up:
     #!/usr/bin/env bash
     set -euo pipefail
     host="root@${SERVER##*@}"
-    ssh "$host" "cd /srv/todo/deploy && docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env up -d --build postgres api caddy automation"
+    ssh "$host" "cd /srv/todo/deploy && docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file /srv/todo/.env up -d --build postgres api caddy automation"
 
 remote-stack-down:
     #!/usr/bin/env bash
     set -euo pipefail
     host="root@${SERVER##*@}"
-    ssh "$host" "cd /srv/todo/deploy && docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env down"
+    ssh "$host" "cd /srv/todo/deploy && docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file /srv/todo/.env down"
 
 remote-ssh:
     ssh "root@${SERVER##*@}"
