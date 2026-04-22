@@ -47,6 +47,7 @@ class TodoOut(ORMBase):
     id: UUID
     context_id: UUID
     title: str
+    description: str
     done: bool
     created_at: datetime
     updated_at: datetime
@@ -55,10 +56,12 @@ class TodoOut(ORMBase):
 
 class TodoCreate(BaseModel):
     title: str = Field(min_length=1, max_length=1024)
+    description: str = Field(default="")
 
 
 class TodoUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=1024)
+    description: str | None = None
     done: bool | None = None
     context_slug: str | None = None
 
@@ -97,6 +100,7 @@ class EventOut(ORMBase):
 class SnapshotTodoOut(BaseModel):
     id: UUID
     title: str
+    description: str
     done: bool
 
 

@@ -7,7 +7,7 @@ use ratatui::{backend::Backend, Terminal};
 use std::time::Duration;
 use todo_api_client::{
     auth, ApiError, AuthConfig, Client, Config, Context, Event as HistoryEvent, Note, PatchedNote,
-    Todo,
+    PatchedTodo, Todo,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -22,6 +22,8 @@ pub enum Mode {
     Command,
     Search,
     Input,
+    TodoView,
+    TodoEdit,
     NoteView,
     NoteEdit,
     History,
@@ -58,6 +60,9 @@ pub struct App {
     pub note_editor: Option<VimEditor>,
     pub editing_note_index: Option<usize>,
     pub editing_note_version: Option<DateTime<Utc>>,
+    pub todo_editor: Option<VimEditor>,
+    pub editing_todo_index: Option<usize>,
+    pub editing_todo_version: Option<DateTime<Utc>>,
     pub history_events: Vec<HistoryEvent>,
     pub history_scroll: usize,
     pub should_quit: bool,
@@ -120,6 +125,9 @@ impl App {
             note_editor: None,
             editing_note_index: None,
             editing_note_version: None,
+            todo_editor: None,
+            editing_todo_index: None,
+            editing_todo_version: None,
             history_events: Vec::new(),
             history_scroll: 0,
             should_quit: false,
@@ -163,6 +171,8 @@ impl App {
             Mode::Command => self.handle_command(key),
             Mode::Search => self.handle_search(key),
             Mode::Input => self.handle_input(key),
+            Mode::TodoView => self.handle_todo_view(key),
+            Mode::TodoEdit => self.handle_todo_edit(key),
             Mode::NoteView => self.handle_note_view(key),
             Mode::NoteEdit => self.handle_note_edit(key),
             Mode::History => self.handle_history(key),
@@ -254,11 +264,15 @@ impl App {
                 Pane::Todos => self.toggle_done(),
                 Pane::Notes => self.open_note_view(),
             },
-            KeyCode::Char('e') => {
-                if self.focus == Pane::Notes {
-                    self.open_note_edit();
+            KeyCode::Char('v') => {
+                if self.focus == Pane::Todos {
+                    self.open_todo_view();
                 }
             }
+            KeyCode::Char('e') => match self.focus {
+                Pane::Todos => self.open_todo_edit(),
+                Pane::Notes => self.open_note_edit(),
+            },
             KeyCode::Tab => {
                 self.focus = match self.focus {
                     Pane::Todos => Pane::Notes,
@@ -472,6 +486,80 @@ impl App {
             self.finish_note_edit(exit);
         }
         Ok(())
+    }
+
+    fn handle_todo_view(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Char('e') => {
+                self.open_todo_edit();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_todo_edit(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(editor) = self.todo_editor.as_mut() else {
+            self.mode = Mode::Normal;
+            return Ok(());
+        };
+        editor.handle_key(key);
+        if let Some(exit) = editor.exit {
+            self.finish_todo_edit(exit);
+        }
+        Ok(())
+    }
+
+    fn finish_todo_edit(&mut self, exit: EditorExit) {
+        let editor = match self.todo_editor.take() {
+            Some(e) => e,
+            None => {
+                self.mode = Mode::Normal;
+                return;
+            }
+        };
+        let idx = self.editing_todo_index.take();
+        let version = self.editing_todo_version.take();
+
+        match exit {
+            EditorExit::Save => {
+                let description = editor.body();
+                let Some(i) = idx else {
+                    self.mode = Mode::Normal;
+                    return;
+                };
+                let Some(todo) = self.todos.get(i) else {
+                    self.mode = Mode::Normal;
+                    return;
+                };
+                let id = todo.id;
+                if todo.description == description {
+                    self.status = String::from("todo description unchanged");
+                    self.mode = Mode::Normal;
+                    return;
+                }
+                let patch = PatchedTodo {
+                    description: Some(description),
+                    ..Default::default()
+                };
+                match self.client.patch_todo(id, &patch, version) {
+                    Ok(updated) => {
+                        if let Some(slot) = self.todos.get_mut(i) {
+                            *slot = updated;
+                        }
+                        self.status = String::from("todo description saved");
+                    }
+                    Err(e) => self.set_error_status(&e),
+                }
+            }
+            EditorExit::Cancel => {
+                self.status = String::from("edit cancelled");
+            }
+        }
+        self.mode = Mode::Normal;
     }
 
     fn finish_note_edit(&mut self, exit: EditorExit) {
@@ -883,6 +971,23 @@ impl App {
         }
     }
 
+    fn open_todo_view(&mut self) {
+        if self.todos.get(self.todo_index).is_some() {
+            self.mode = Mode::TodoView;
+        }
+    }
+
+    fn open_todo_edit(&mut self) {
+        if let Some(todo) = self.todos.get(self.todo_index) {
+            self.todo_editor = Some(VimEditor::new(&todo.description));
+            self.editing_todo_index = Some(self.todo_index);
+            self.editing_todo_version = Some(todo.updated_at);
+            self.mode = Mode::TodoEdit;
+            self.status =
+                String::from("editing todo description — :w save  :q cancel  i insert  Esc normal");
+        }
+    }
+
     fn move_selection(&mut self, delta: i64) {
         let visible = self.visible_indices(self.focus);
         if visible.is_empty() {
@@ -914,7 +1019,11 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, t)| t.deleted_at.is_none())
-            .filter(|(_, t)| f.is_empty() || t.title.to_lowercase().contains(&f))
+            .filter(|(_, t)| {
+                f.is_empty()
+                    || t.title.to_lowercase().contains(&f)
+                    || t.description.to_lowercase().contains(&f)
+            })
             .map(|(i, _)| i)
             .collect()
     }

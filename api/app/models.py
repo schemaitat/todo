@@ -36,6 +36,7 @@ class EventKind(StrEnum):
     TODO_CREATED = "TodoCreated"
     TODO_RENAMED = "TodoRenamed"
     TODO_TOGGLED = "TodoToggled"
+    TODO_DESCRIPTION_EDITED = "TodoDescriptionEdited"
     TODO_DELETED = "TodoDeleted"
     NOTE_CREATED = "NoteCreated"
     NOTE_RENAMED = "NoteRenamed"
@@ -117,6 +118,7 @@ class Todo(Base):
         Uuid, ForeignKey("contexts.id", ondelete="CASCADE"), nullable=False
     )
     title: Mapped[str] = mapped_column(String(1024), nullable=False)
+    description: Mapped[str] = mapped_column(String, nullable=False, server_default="", default="")
     done: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

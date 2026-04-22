@@ -31,6 +31,19 @@ pub struct PatchedNote {
     pub body: Option<String>,
 }
 
+/// Body passed to [`Client::patch_todo`]; each field is optional so partial updates stay expressive.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct PatchedTodo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_slug: Option<String>,
+}
+
 impl Client {
     pub fn from_env() -> ApiResult<Self> {
         Self::new(Config::load()?)
@@ -86,7 +99,10 @@ impl Client {
     // --- contexts ---------------------------------------------------------
 
     pub fn list_contexts(&self) -> ApiResult<Vec<Context>> {
-        self.get_json::<Vec<Context>>(["contexts"])
+        let mut url = self.url(["contexts"])?;
+        url.query_pairs_mut()
+            .append_pair("include_archived", "false");
+        Self::decode_json(send(self.http.get(url))?)
     }
 
     pub fn create_context(
@@ -109,6 +125,22 @@ impl Client {
         self.get_json::<Vec<Todo>>(["contexts", context_slug, "todos"])
     }
 
+    pub fn get_todo(&self, id: Uuid) -> ApiResult<(Todo, DateTime<Utc>)> {
+        let url = self.url(["todos", &id.to_string()])?;
+        let resp = send(self.http.get(url))?;
+        let resp = check_status(resp)?;
+        let last_modified = resp
+            .headers()
+            .get("Last-Modified")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| chrono::DateTime::parse_from_rfc2822(s).ok())
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now);
+        let body = resp.text()?;
+        let todo: Todo = serde_json::from_str(&body).map_err(ApiError::from)?;
+        Ok((todo, last_modified))
+    }
+
     pub fn create_todo(&self, context_slug: &str, title: &str) -> ApiResult<Todo> {
         self.post_json(
             ["contexts", context_slug, "todos"],
@@ -129,6 +161,21 @@ impl Client {
             ["todos", &id.to_string()],
             &json!({ "context_slug": context_slug }),
         )
+    }
+
+    pub fn patch_todo(
+        &self,
+        id: Uuid,
+        patch: &PatchedTodo,
+        if_match: Option<DateTime<Utc>>,
+    ) -> ApiResult<Todo> {
+        let url = self.url(["todos", &id.to_string()])?;
+        let mut builder = self.http.patch(url).json(patch);
+        if let Some(ts) = if_match {
+            let fmt = ts.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+            builder = builder.header("If-Match", fmt);
+        }
+        Self::decode_json(send(builder)?)
     }
 
     pub fn delete_todo(&self, id: Uuid) -> ApiResult<()> {

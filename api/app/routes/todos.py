@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from email.utils import format_datetime, parsedate_to_datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +39,12 @@ async def _load_todo(session: AsyncSession, user: User, todo_id: UUID) -> Todo:
     return todo
 
 
+def _to_http_date(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return format_datetime(dt, usegmt=True)
+
+
 @router.get("/contexts/{slug}/todos", response_model=list[TodoOut])
 async def list_todos(
     slug: str,
@@ -63,7 +70,7 @@ async def create_todo(
     session: AsyncSession = Depends(session_dependency),
 ) -> Todo:
     ctx = await _load_context(session, user, slug)
-    todo = Todo(context_id=ctx.id, title=body.title)
+    todo = Todo(context_id=ctx.id, title=body.title, description=body.description)
     session.add(todo)
     await session.flush()
     await record_event(
@@ -80,14 +87,45 @@ async def create_todo(
     return todo
 
 
-@router.patch("/todos/{todo_id}", response_model=TodoOut)
-async def update_todo(
+@router.get("/todos/{todo_id}", response_model=TodoOut)
+async def get_todo(
     todo_id: UUID,
-    body: TodoUpdate,
+    response: Response,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(session_dependency),
 ) -> Todo:
     todo = await _load_todo(session, user, todo_id)
+    response.headers["Last-Modified"] = _to_http_date(todo.updated_at)
+    return todo
+
+
+@router.patch("/todos/{todo_id}", response_model=TodoOut)
+async def update_todo(
+    todo_id: UUID,
+    body: TodoUpdate,
+    response: Response,
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(session_dependency),
+) -> Todo:
+    todo = await _load_todo(session, user, todo_id)
+
+    if if_match is not None:
+        try:
+            expected = parsedate_to_datetime(if_match)
+        except (TypeError, ValueError) as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="bad If-Match header"
+            ) from e
+        current = todo.updated_at
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=UTC)
+        if abs((current - expected).total_seconds()) > 1:
+            raise HTTPException(
+                status_code=status.HTTP_412_PRECONDITION_FAILED,
+                detail="todo changed elsewhere",
+            )
+
     now = datetime.now(UTC)
     events = []
     if body.context_slug is not None:
@@ -104,6 +142,16 @@ async def update_todo(
         todo.done = body.done
         todo.updated_at = now
         events.append((todo.context_id, EventKind.TODO_TOGGLED, {"done": todo.done}))
+    if body.description is not None and body.description != todo.description:
+        todo.description = body.description
+        todo.updated_at = now
+        events.append(
+            (
+                todo.context_id,
+                EventKind.TODO_DESCRIPTION_EDITED,
+                {"length": len(todo.description)},
+            )
+        )
 
     for context_id, kind, payload in events:
         await record_event(
@@ -117,6 +165,7 @@ async def update_todo(
         )
     await session.commit()
     await session.refresh(todo)
+    response.headers["Last-Modified"] = _to_http_date(todo.updated_at)
     return todo
 
 

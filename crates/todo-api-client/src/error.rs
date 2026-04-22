@@ -20,7 +20,7 @@ pub enum ApiError {
     #[error("conflict: {0}")]
     Conflict(String),
 
-    #[error("note changed elsewhere — reopen and retry")]
+    #[error("item changed elsewhere — reopen and retry")]
     StaleNote,
 
     #[error("bad request: {0}")]
@@ -48,7 +48,7 @@ impl ApiError {
         match self {
             ApiError::Network(_) => "offline — read-only".to_string(),
             ApiError::Unauthorized => "unauthorized — check TODO_API_KEY".to_string(),
-            ApiError::StaleNote => "note changed elsewhere — reopen".to_string(),
+            ApiError::StaleNote => "item changed elsewhere — reopen".to_string(),
             ApiError::NotFound(detail) => format!("not found: {}", detail),
             ApiError::Conflict(detail) => format!("conflict: {}", detail),
             ApiError::BadRequest(detail) => format!("bad request: {}", detail),

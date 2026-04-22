@@ -10,7 +10,7 @@ pub mod error;
 
 mod client;
 
-pub use client::{Client, PatchedNote};
+pub use client::{Client, PatchedNote, PatchedTodo};
 pub use config::{AuthConfig, Config, OidcConfig};
 pub use error::{ApiError, ApiResult};
 pub use todo_store::{Context, EmptyPayload, Event, EventKind, Note, Todo, UserInfo};

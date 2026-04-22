@@ -40,6 +40,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     match app.mode {
+        Mode::TodoView => draw_todo_view(f, app, area),
+        Mode::TodoEdit => draw_todo_edit(f, app, area),
         Mode::NoteView => draw_note_view(f, app, area),
         Mode::NoteEdit => draw_note_edit(f, app, area),
         Mode::History => draw_history(f, app, area),
@@ -150,11 +152,15 @@ fn draw_todos(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 Style::default().fg(Color::White)
             };
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(mark, mark_style),
                 Span::raw(" "),
                 Span::styled(highlight_match(&t.title, &app.filter), title_style),
-            ]))
+            ];
+            if !t.description.is_empty() {
+                spans.push(Span::styled(" …", Style::default().fg(DIM)));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -278,10 +284,12 @@ fn draw_command(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     let hints = match app.mode {
-        Mode::Normal => "hjkl move/switch  i add  dd del  x done  m move  / filter  cc cycle-ctx  C browser  Esc clear  : cmd  q quit",
+        Mode::Normal => "hjkl move/switch  i add  dd del  x done  v view-desc  e edit-desc  m move  / filter  cc cycle-ctx  C browser  Esc clear  : cmd  q quit",
         Mode::Command => "Enter run  Esc cancel   :ctx [slug]  :ctx new <slug>  :ctx delete <slug>  :history  :q",
         Mode::Search => "type to filter both panes  Enter keep  Esc revert",
         Mode::Input => "Enter confirm  Esc cancel",
+        Mode::TodoView => "Esc/Enter close  e edit description",
+        Mode::TodoEdit => "vim keys: hjkl move  i/a/o insert  dd del-line  yy p  u undo  v visual  :w save  :q cancel",
         Mode::NoteView => "Esc/Enter close  e edit",
         Mode::NoteEdit => "vim keys: hjkl move  i/a/o insert  dd del-line  yy p  u undo  v visual  :w save  :q cancel",
         Mode::History => "j/k scroll  gg/G top/bottom  Esc/q close",
@@ -325,6 +333,147 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(text).block(block).style(popup_style()),
         popup,
     );
+}
+
+fn draw_todo_view(f: &mut Frame, app: &App, area: Rect) {
+    let Some(todo) = app.todos.get(app.todo_index) else {
+        return;
+    };
+    let popup = centered_rect_abs(80, 70, area);
+    f.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(popup_style())
+        .border_style(Style::default().fg(Color::Yellow).bg(POPUP_BG))
+        .title(Span::styled(
+            format!(" {} ", todo.title),
+            Style::default().fg(Color::Yellow).bg(POPUP_BG).bold(),
+        ));
+    let body = if todo.description.is_empty() {
+        String::from("(no description — press e to add one)")
+    } else {
+        todo.description.clone()
+    };
+    let p = Paragraph::new(body)
+        .block(block)
+        .style(popup_style())
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, popup);
+}
+
+fn draw_todo_edit(f: &mut Frame, app: &App, area: Rect) {
+    let title = app
+        .editing_todo_index
+        .and_then(|i| app.todos.get(i))
+        .map(|t| t.title.clone())
+        .unwrap_or_else(|| String::from("todo"));
+    let Some(editor) = app.todo_editor.as_ref() else {
+        return;
+    };
+    let popup = centered_rect_abs(92, 88, area);
+    f.render_widget(Clear, popup);
+
+    let mode_label = match editor.mode {
+        EditorMode::Normal => " NORMAL ",
+        EditorMode::Insert => " INSERT ",
+        EditorMode::Visual => {
+            if editor.visual_linewise {
+                " V-LINE "
+            } else {
+                " VISUAL "
+            }
+        }
+        EditorMode::Command => " COMMAND ",
+    };
+    let mode_color = match editor.mode {
+        EditorMode::Normal => Color::Yellow,
+        EditorMode::Insert => Color::Green,
+        EditorMode::Visual => Color::Magenta,
+        EditorMode::Command => Color::Cyan,
+    };
+    let header = format!(" {} — {} ", title, editor.lines.len());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(popup_style())
+        .border_style(Style::default().fg(mode_color).bg(POPUP_BG))
+        .title(Span::styled(
+            header,
+            Style::default().fg(mode_color).bg(POPUP_BG).bold(),
+        ))
+        .title_bottom(Line::from(vec![
+            Span::styled(
+                mode_label,
+                Style::default().bg(mode_color).fg(Color::Black).bold(),
+            ),
+            Span::styled(
+                format!(" {}:{} ", editor.row + 1, editor.col + 1),
+                Style::default().fg(POPUP_FG).bg(POPUP_BG),
+            ),
+        ]));
+
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let status_h: u16 = 1;
+    let body_h = inner.height.saturating_sub(status_h);
+    let body_area = Rect {
+        x: inner.x,
+        y: inner.y,
+        width: inner.width,
+        height: body_h,
+    };
+    let status_area = Rect {
+        x: inner.x,
+        y: inner.y + body_h,
+        width: inner.width,
+        height: status_h,
+    };
+
+    editor.viewport_height.set(body_area.height as usize);
+    update_scroll(editor, body_area.height as usize);
+    let scroll = editor.scroll.get();
+
+    let gutter_w = gutter_width(editor.lines.len());
+    let text_x = body_area.x + gutter_w + 1;
+    let text_w = body_area.width.saturating_sub(gutter_w + 1);
+
+    let lines = render_editor_lines(editor, scroll, body_area.height as usize, text_w as usize);
+    let p = Paragraph::new(lines).style(popup_style());
+    let text_area = Rect {
+        x: text_x,
+        y: body_area.y,
+        width: text_w,
+        height: body_area.height,
+    };
+    f.render_widget(p, text_area);
+
+    let gutter = render_gutter(editor, scroll, body_area.height as usize, gutter_w as usize);
+    let gutter_area = Rect {
+        x: body_area.x,
+        y: body_area.y,
+        width: gutter_w,
+        height: body_area.height,
+    };
+    f.render_widget(
+        Paragraph::new(gutter).style(Style::default().fg(DIM).bg(POPUP_BG)),
+        gutter_area,
+    );
+
+    let status_line = build_status_line(editor);
+    f.render_widget(
+        Paragraph::new(status_line).style(popup_style()),
+        status_area,
+    );
+
+    if editor.mode == EditorMode::Insert {
+        let screen_row = editor.row.saturating_sub(scroll);
+        if (screen_row as u16) < body_area.height {
+            let col_offset = editor.col as u16;
+            if col_offset < text_w {
+                f.set_cursor_position((text_x + col_offset, body_area.y + screen_row as u16));
+            }
+        }
+    }
 }
 
 fn draw_note_view(f: &mut Frame, app: &App, area: Rect) {
@@ -669,6 +818,11 @@ fn render_event(e: &HistoryEvent) -> (String, Color, String) {
                 "TODO TOGGLED".to_string(),
                 Color::Blue,
                 format!("done={}", done),
+            ),
+            EventKind::TodoDescriptionEdited { length } => (
+                "TODO DESC EDITED".to_string(),
+                Color::Blue,
+                length.map(|n| format!("{} chars", n)).unwrap_or_default(),
             ),
             EventKind::TodoDeleted(_) => ("TODO DELETED".to_string(), Color::Red, String::new()),
             EventKind::NoteCreated { title } => (

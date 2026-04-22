@@ -24,6 +24,8 @@ pub struct Todo {
     pub id: Uuid,
     pub context_id: Uuid,
     pub title: String,
+    #[serde(default)]
+    pub description: String,
     pub done: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -86,6 +88,10 @@ pub enum EventKind {
     },
     TodoToggled {
         done: bool,
+    },
+    TodoDescriptionEdited {
+        #[serde(default)]
+        length: Option<usize>,
     },
     TodoDeleted(#[serde(default)] EmptyPayload),
     NoteCreated {
