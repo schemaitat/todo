@@ -2,6 +2,7 @@
   "realm": "todo",
   "enabled": true,
   "sslRequired": "external",
+  "ssoSessionIdleTimeout": 28800,
   "registrationAllowed": false,
   "loginWithEmailAllowed": true,
   "duplicateEmailsAllowed": false,
