@@ -98,7 +98,10 @@ async def get_snapshot(
             SnapshotContextJsonOut(
                 slug=ctx.slug,
                 name=ctx.name,
-                open_todos=[SnapshotTodoOut(id=t.id, title=t.title, done=t.done) for t in todos],
+                open_todos=[
+                    SnapshotTodoOut(id=t.id, title=t.title, description=t.description, done=t.done)
+                    for t in todos
+                ],
                 notes=[SnapshotNoteOut(id=n.id, title=n.title, body=n.body) for n in notes],
             )
             for ctx, todos, notes in data
