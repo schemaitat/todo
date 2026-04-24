@@ -77,6 +77,7 @@ pub struct App {
     pub move_source: Option<(Pane, usize)>,
     pub move_picker_index: usize,
     pub current_user: Option<String>,
+    needs_clear: bool,
 }
 
 impl App {
@@ -142,6 +143,7 @@ impl App {
             api_url,
             context_index: 0,
             current_user,
+            needs_clear: false,
         };
         app.client.set_active_context(&app.active_context.slug);
         app.snap_selection();
@@ -150,6 +152,10 @@ impl App {
 
     pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
         loop {
+            if self.needs_clear {
+                terminal.clear()?;
+                self.needs_clear = false;
+            }
             terminal.draw(|f| ui::draw(f, self))?;
             if event::poll(Duration::from_millis(200))? {
                 if let CEvent::Key(key) = event::read()? {
@@ -680,6 +686,46 @@ impl App {
         }
     }
 
+    fn reload_data(&mut self) -> bool {
+        let contexts = match self.client.list_contexts() {
+            Ok(c) if !c.is_empty() => c,
+            Ok(_) => {
+                self.status = String::from("no contexts returned by API");
+                return false;
+            }
+            Err(e) => {
+                self.status = format!("failed to reload contexts: {e}");
+                return false;
+            }
+        };
+        let active_slug = self.active_context.slug.clone();
+        let active_context = contexts
+            .iter()
+            .find(|c| c.slug == active_slug)
+            .cloned()
+            .unwrap_or_else(|| contexts[0].clone());
+        let todos = match self.client.list_todos(&active_context.slug) {
+            Ok(t) => t,
+            Err(e) => {
+                self.status = format!("failed to reload todos: {e}");
+                return false;
+            }
+        };
+        let notes = match self.client.list_notes(&active_context.slug) {
+            Ok(n) => n,
+            Err(e) => {
+                self.status = format!("failed to reload notes: {e}");
+                return false;
+            }
+        };
+        self.contexts = contexts;
+        self.active_context = active_context;
+        self.todos = todos;
+        self.notes = notes;
+        self.snap_selection();
+        true
+    }
+
     fn do_oidc_login(&mut self) {
         let oidc = match &self.config.oidc {
             Some(o) => o.clone(),
@@ -690,13 +736,13 @@ impl App {
             }
         };
         self.status = String::from("opening browser for login...");
+        self.needs_clear = true;
         match auth::login_interactive(&oidc.keycloak_url, &oidc.realm, &oidc.client_id) {
             Ok(tokens) => {
                 if let Err(e) = auth::save_tokens(&tokens) {
                     self.status = format!("login ok but could not save tokens: {e}");
                     return;
                 }
-                // Rebuild client with the new Bearer token.
                 let new_config = Config {
                     auth: AuthConfig::Bearer(tokens.access_token),
                     ..self.config.clone()
@@ -706,10 +752,12 @@ impl App {
                         self.config = new_config;
                         self.client = client;
                         self.current_user = self.client.get_me().ok().map(|u| u.email);
-                        self.status = match &self.current_user {
-                            Some(n) => format!("logged in as: {n}"),
-                            None => String::from("login successful"),
-                        };
+                        if self.reload_data() {
+                            self.status = match &self.current_user {
+                                Some(n) => format!("logged in as: {n}"),
+                                None => String::from("login successful"),
+                            };
+                        }
                     }
                     Err(e) => self.status = format!("login ok but client error: {e}"),
                 }
