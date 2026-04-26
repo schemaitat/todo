@@ -4,15 +4,15 @@ version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "todo-tui"
+name = "todo"
 path = "src/main.rs"
 
 [dependencies]
-todo-api-client = { path = "../todo-api-client" }
+todo-fs = { path = "../todo-fs" }
 anyhow.workspace = true
 chrono.workspace = true
+clap.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-uuid.workspace = true
-ratatui = "0.29"
-crossterm = "0.28"
+toml.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true

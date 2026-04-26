@@ -1,8 +1,5 @@
-// Ratatui-based rendering for the todo-tui frontend.
-
 use crate::app::{App, InputTarget, Mode, Pane};
 use crate::editor::{EditorMode, VimEditor};
-use todo_api_client::{Event as HistoryEvent, EventKind};
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -44,9 +41,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Mode::TodoEdit => draw_todo_edit(f, app, area),
         Mode::NoteView => draw_note_view(f, app, area),
         Mode::NoteEdit => draw_note_edit(f, app, area),
-        Mode::History => draw_history(f, app, area),
         Mode::ContextBrowser => draw_context_browser(f, app, area),
-        Mode::MovePicker => draw_move_picker(f, app, area),
         _ => {}
     }
 
@@ -57,11 +52,11 @@ pub fn draw(f: &mut Frame, app: &App) {
 
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let title = Span::styled(
-        " todo-tui ",
+        " todo ",
         Style::default().bg(ACCENT).fg(Color::Black).bold(),
     );
     let ctx = Span::styled(
-        format!(" [{}] ", app.active_context.slug),
+        format!(" [{}] ", app.store.context()),
         Style::default().bg(Color::Magenta).fg(Color::Black).bold(),
     );
     let counts = format!(" todos:{}  notes:{} ", app.todos.len(), app.notes.len());
@@ -78,25 +73,6 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         Span::raw("  "),
         Span::styled(focus, Style::default().fg(ACCENT).bold()),
     ];
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(
-        format!(" {} ", app.api_url),
-        Style::default().fg(DIM),
-    ));
-    if let Some(ref user) = app.current_user {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!(" {user} "),
-            Style::default().fg(Color::Green).bold(),
-        ));
-    }
-    if app.offline {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            " offline ",
-            Style::default().bg(ERROR).fg(Color::Black).bold(),
-        ));
-    }
     if !app.filter.is_empty() {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
@@ -155,10 +131,13 @@ fn draw_todos(f: &mut Frame, app: &App, area: Rect) {
             let mut spans = vec![
                 Span::styled(mark, mark_style),
                 Span::raw(" "),
-                Span::styled(highlight_match(&t.title, &app.filter), title_style),
+                Span::styled(t.title.clone(), title_style),
             ];
             if !t.description.is_empty() {
-                spans.push(Span::styled(" …", Style::default().fg(DIM)));
+                spans.push(Span::styled(
+                    format!("  {}", t.description),
+                    Style::default().fg(DIM),
+                ));
             }
             ListItem::new(Line::from(spans))
         })
@@ -194,13 +173,17 @@ fn draw_notes(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|&i| {
             let n = &app.notes[i];
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled("● ", Style::default().fg(Color::Magenta)),
-                Span::styled(
-                    highlight_match(&n.title, &app.filter),
-                    Style::default().fg(Color::White).bold(),
-                ),
-            ]))
+                Span::styled(n.title.clone(), Style::default().fg(Color::White).bold()),
+            ];
+            if !n.description.is_empty() {
+                spans.push(Span::styled(
+                    format!("  {}", n.description),
+                    Style::default().fg(DIM),
+                ));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -225,10 +208,6 @@ fn draw_notes(f: &mut Frame, app: &App, area: Rect) {
         };
         draw_empty(f, area, msg);
     }
-}
-
-fn highlight_match(text: &str, _filter: &str) -> String {
-    text.to_string()
 }
 
 fn draw_empty(f: &mut Frame, area: Rect, msg: &str) {
@@ -284,17 +263,21 @@ fn draw_command(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_help(f: &mut Frame, app: &App, area: Rect) {
     let hints = match app.mode {
-        Mode::Normal => "hjkl move/switch  i add  dd del  x done  v view-desc  e edit-desc  m move  / filter  cc cycle-ctx  C browser  Esc clear  : cmd  q quit",
-        Mode::Command => "Enter run  Esc cancel   :ctx [slug]  :ctx new <slug>  :ctx delete <slug>  :history  :q",
+        Mode::Normal => {
+            "hjkl move/switch  i add  r rename  dd del  x done  v view  e edit  / filter  cc cycle-ctx  C browser  Esc clear  : cmd  q quit"
+        }
+        Mode::Command => "Enter run  Esc cancel   :ctx [slug]  :ctx new <name>  :reload  :q",
         Mode::Search => "type to filter both panes  Enter keep  Esc revert",
         Mode::Input => "Enter confirm  Esc cancel",
-        Mode::TodoView => "Esc/Enter close  e edit description",
-        Mode::TodoEdit => "vim keys: hjkl move  i/a/o insert  dd del-line  yy p  u undo  v visual  :w save  :q cancel",
+        Mode::TodoView => "Esc/Enter close  e edit body",
+        Mode::TodoEdit => {
+            "vim keys: hjkl move  i/a/o insert  dd del-line  yy p  u undo  v visual  :w save  :q cancel"
+        }
         Mode::NoteView => "Esc/Enter close  e edit",
-        Mode::NoteEdit => "vim keys: hjkl move  i/a/o insert  dd del-line  yy p  u undo  v visual  :w save  :q cancel",
-        Mode::History => "j/k scroll  gg/G top/bottom  Esc/q close",
-        Mode::ContextBrowser => "j/k navigate  Enter switch  n new  d delete  Esc close",
-        Mode::MovePicker => "j/k navigate  Enter move here  Esc cancel",
+        Mode::NoteEdit => {
+            "vim keys: hjkl move  i/a/o insert  dd del-line  yy p  u undo  v visual  :w save  :q cancel"
+        }
+        Mode::ContextBrowser => "j/k navigate  Enter switch  n new  Esc close",
     };
     f.render_widget(
         Paragraph::new(Span::styled(hints, Style::default().fg(DIM))),
@@ -312,7 +295,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         Some(InputTarget::NewNote) => "New note",
         Some(InputTarget::RenameTodo) => "Rename todo",
         Some(InputTarget::RenameNote) => "Rename note",
-        Some(InputTarget::NewContext) => "New context (slug)",
+        Some(InputTarget::NewContext) => "New context",
         None => "Input",
     };
     let popup = centered_rect(60, 3, area);
@@ -349,10 +332,10 @@ fn draw_todo_view(f: &mut Frame, app: &App, area: Rect) {
             format!(" {} ", todo.title),
             Style::default().fg(Color::Yellow).bg(POPUP_BG).bold(),
         ));
-    let body = if todo.description.is_empty() {
-        String::from("(no description — press e to add one)")
+    let body = if todo.body.is_empty() {
+        String::from("(empty body — press e to add content)")
     } else {
-        todo.description.clone()
+        todo.body.clone()
     };
     let p = Paragraph::new(body)
         .block(block)
@@ -363,117 +346,15 @@ fn draw_todo_view(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_todo_edit(f: &mut Frame, app: &App, area: Rect) {
     let title = app
-        .editing_todo_index
-        .and_then(|i| app.todos.get(i))
+        .editing_todo_slug
+        .as_deref()
+        .and_then(|slug| app.todos.iter().find(|t| t.slug == slug))
         .map(|t| t.title.clone())
         .unwrap_or_else(|| String::from("todo"));
     let Some(editor) = app.todo_editor.as_ref() else {
         return;
     };
-    let popup = centered_rect_abs(92, 88, area);
-    f.render_widget(Clear, popup);
-
-    let mode_label = match editor.mode {
-        EditorMode::Normal => " NORMAL ",
-        EditorMode::Insert => " INSERT ",
-        EditorMode::Visual => {
-            if editor.visual_linewise {
-                " V-LINE "
-            } else {
-                " VISUAL "
-            }
-        }
-        EditorMode::Command => " COMMAND ",
-    };
-    let mode_color = match editor.mode {
-        EditorMode::Normal => Color::Yellow,
-        EditorMode::Insert => Color::Green,
-        EditorMode::Visual => Color::Magenta,
-        EditorMode::Command => Color::Cyan,
-    };
-    let header = format!(" {} — {} ", title, editor.lines.len());
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .style(popup_style())
-        .border_style(Style::default().fg(mode_color).bg(POPUP_BG))
-        .title(Span::styled(
-            header,
-            Style::default().fg(mode_color).bg(POPUP_BG).bold(),
-        ))
-        .title_bottom(Line::from(vec![
-            Span::styled(
-                mode_label,
-                Style::default().bg(mode_color).fg(Color::Black).bold(),
-            ),
-            Span::styled(
-                format!(" {}:{} ", editor.row + 1, editor.col + 1),
-                Style::default().fg(POPUP_FG).bg(POPUP_BG),
-            ),
-        ]));
-
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
-
-    let status_h: u16 = 1;
-    let body_h = inner.height.saturating_sub(status_h);
-    let body_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: body_h,
-    };
-    let status_area = Rect {
-        x: inner.x,
-        y: inner.y + body_h,
-        width: inner.width,
-        height: status_h,
-    };
-
-    editor.viewport_height.set(body_area.height as usize);
-    update_scroll(editor, body_area.height as usize);
-    let scroll = editor.scroll.get();
-
-    let gutter_w = gutter_width(editor.lines.len());
-    let text_x = body_area.x + gutter_w + 1;
-    let text_w = body_area.width.saturating_sub(gutter_w + 1);
-
-    let lines = render_editor_lines(editor, scroll, body_area.height as usize, text_w as usize);
-    let p = Paragraph::new(lines).style(popup_style());
-    let text_area = Rect {
-        x: text_x,
-        y: body_area.y,
-        width: text_w,
-        height: body_area.height,
-    };
-    f.render_widget(p, text_area);
-
-    let gutter = render_gutter(editor, scroll, body_area.height as usize, gutter_w as usize);
-    let gutter_area = Rect {
-        x: body_area.x,
-        y: body_area.y,
-        width: gutter_w,
-        height: body_area.height,
-    };
-    f.render_widget(
-        Paragraph::new(gutter).style(Style::default().fg(DIM).bg(POPUP_BG)),
-        gutter_area,
-    );
-
-    let status_line = build_status_line(editor);
-    f.render_widget(
-        Paragraph::new(status_line).style(popup_style()),
-        status_area,
-    );
-
-    if editor.mode == EditorMode::Insert {
-        let screen_row = editor.row.saturating_sub(scroll);
-        if (screen_row as u16) < body_area.height {
-            let col_offset = editor.col as u16;
-            if col_offset < text_w {
-                f.set_cursor_position((text_x + col_offset, body_area.y + screen_row as u16));
-            }
-        }
-    }
+    render_editor_popup(f, editor, &title, Color::Yellow, area);
 }
 
 fn draw_note_view(f: &mut Frame, app: &App, area: Rect) {
@@ -504,13 +385,18 @@ fn draw_note_view(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_note_edit(f: &mut Frame, app: &App, area: Rect) {
     let title = app
-        .editing_note_index
-        .and_then(|i| app.notes.get(i))
+        .editing_note_slug
+        .as_deref()
+        .and_then(|slug| app.notes.iter().find(|n| n.slug == slug))
         .map(|n| n.title.clone())
         .unwrap_or_else(|| String::from("note"));
     let Some(editor) = app.note_editor.as_ref() else {
         return;
     };
+    render_editor_popup(f, editor, &title, Color::Cyan, area);
+}
+
+fn render_editor_popup(f: &mut Frame, editor: &VimEditor, title: &str, accent: Color, area: Rect) {
     let popup = centered_rect_abs(92, 88, area);
     f.render_widget(Clear, popup);
 
@@ -527,12 +413,12 @@ fn draw_note_edit(f: &mut Frame, app: &App, area: Rect) {
         EditorMode::Command => " COMMAND ",
     };
     let mode_color = match editor.mode {
-        EditorMode::Normal => Color::Cyan,
+        EditorMode::Normal => accent,
         EditorMode::Insert => Color::Green,
         EditorMode::Visual => Color::Magenta,
         EditorMode::Command => Color::Yellow,
     };
-    let header = format!(" {} — {} ", title, editor.lines.len());
+    let header = format!(" {} — {} lines ", title, editor.lines.len());
     let block = Block::default()
         .borders(Borders::ALL)
         .style(popup_style())
@@ -743,41 +629,39 @@ fn build_status_line(editor: &VimEditor) -> Line<'static> {
     }
 }
 
-fn draw_history(f: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect_abs(80, 80, area);
+fn draw_context_browser(f: &mut Frame, app: &App, area: Rect) {
+    let height = (app.contexts.len() as u16 + 4).min(area.height);
+    let popup = centered_rect(40, height, area);
     f.render_widget(Clear, popup);
+
     let block = Block::default()
         .borders(Borders::ALL)
         .style(popup_style())
-        .border_style(Style::default().fg(ACCENT).bg(POPUP_BG))
+        .border_style(Style::default().fg(Color::Magenta).bg(POPUP_BG))
         .title(Span::styled(
-            format!(" history ({} events) ", app.history_events.len()),
-            Style::default().fg(ACCENT).bg(POPUP_BG).bold(),
+            format!(" contexts ({}) ", app.contexts.len()),
+            Style::default().fg(Color::Magenta).bg(POPUP_BG).bold(),
+        ))
+        .title_bottom(Span::styled(
+            " j/k  Enter switch  n new  Esc close ",
+            Style::default().fg(DIM).bg(POPUP_BG),
         ));
 
-    if app.history_events.is_empty() {
-        let p = Paragraph::new(Span::styled(
-            "(no events yet — create a todo or note)",
-            Style::default().fg(DIM).bg(POPUP_BG),
-        ))
-        .block(block)
-        .style(popup_style());
-        f.render_widget(p, popup);
-        return;
-    }
-
+    let active = app.store.context();
     let items: Vec<ListItem> = app
-        .history_events
+        .contexts
         .iter()
-        .map(|e| {
-            let ts = e.ts.format("%Y-%m-%d %H:%M:%S").to_string();
-            let (label, color, detail) = render_event(e);
+        .map(|ctx| {
+            let is_active = ctx == active;
+            let marker = if is_active { "* " } else { "  " };
+            let style = if is_active {
+                Style::default().fg(Color::Magenta).bg(POPUP_BG).bold()
+            } else {
+                popup_style()
+            };
             ListItem::new(Line::from(vec![
-                Span::styled(ts, Style::default().fg(DIM).bg(POPUP_BG)),
-                Span::styled("  ", popup_style()),
-                Span::styled(label, Style::default().fg(color).bg(POPUP_BG).bold()),
-                Span::styled("  ", popup_style()),
-                Span::styled(detail, popup_style()),
+                Span::styled(marker, style),
+                Span::styled(ctx.clone(), style),
             ]))
         })
         .collect();
@@ -787,88 +671,17 @@ fn draw_history(f: &mut Frame, app: &App, area: Rect) {
         .style(popup_style())
         .highlight_style(
             Style::default()
-                .bg(ACCENT)
+                .bg(Color::Magenta)
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▶ ");
 
     let mut state = ListState::default();
-    let selected = app
-        .history_scroll
-        .min(app.history_events.len().saturating_sub(1));
-    state.select(Some(selected));
+    state.select(Some(
+        app.context_index.min(app.contexts.len().saturating_sub(1)),
+    ));
     f.render_stateful_widget(list, popup, &mut state);
-}
-
-fn render_event(e: &HistoryEvent) -> (String, Color, String) {
-    if let Some(kind) = e.parsed_kind() {
-        return match kind {
-            EventKind::TodoCreated { title } => (
-                "TODO CREATED".to_string(),
-                Color::Green,
-                format!("\"{}\"", title),
-            ),
-            EventKind::TodoRenamed { title } => (
-                "TODO RENAMED".to_string(),
-                Color::Yellow,
-                format!("\"{}\"", title),
-            ),
-            EventKind::TodoToggled { done } => (
-                "TODO TOGGLED".to_string(),
-                Color::Blue,
-                format!("done={}", done),
-            ),
-            EventKind::TodoDescriptionEdited { length } => (
-                "TODO DESC EDITED".to_string(),
-                Color::Blue,
-                length.map(|n| format!("{} chars", n)).unwrap_or_default(),
-            ),
-            EventKind::TodoDeleted(_) => ("TODO DELETED".to_string(), Color::Red, String::new()),
-            EventKind::NoteCreated { title } => (
-                "NOTE CREATED".to_string(),
-                Color::Green,
-                format!("\"{}\"", title),
-            ),
-            EventKind::NoteRenamed { title } => (
-                "NOTE RENAMED".to_string(),
-                Color::Yellow,
-                format!("\"{}\"", title),
-            ),
-            EventKind::NoteEdited { length } => (
-                "NOTE EDITED".to_string(),
-                Color::Blue,
-                length.map(|n| format!("{} chars", n)).unwrap_or_default(),
-            ),
-            EventKind::NoteDeleted(_) => ("NOTE DELETED".to_string(), Color::Red, String::new()),
-            EventKind::ContextCreated { slug, name } => (
-                "CONTEXT CREATED".to_string(),
-                Color::Magenta,
-                format!("[{}] {}", slug, name),
-            ),
-            EventKind::ContextRenamed { slug, name } => (
-                "CONTEXT RENAMED".to_string(),
-                Color::Yellow,
-                format!("[{}] {}", slug, name),
-            ),
-            EventKind::ContextArchived { slug } => (
-                "CONTEXT ARCHIVED".to_string(),
-                Color::Red,
-                format!("[{}]", slug),
-            ),
-            EventKind::TodoMoved { to_slug } => (
-                "TODO MOVED".to_string(),
-                Color::Cyan,
-                format!("-> [{}]", to_slug),
-            ),
-            EventKind::NoteMoved { to_slug } => (
-                "NOTE MOVED".to_string(),
-                Color::Cyan,
-                format!("-> [{}]", to_slug),
-            ),
-        };
-    }
-    (e.kind.clone(), DIM, String::new())
 }
 
 fn draw_suggestions(f: &mut Frame, app: &App, cmd_area: Rect) {
@@ -922,108 +735,6 @@ fn draw_suggestions(f: &mut Frame, app: &App, cmd_area: Rect) {
         .border_style(Style::default().fg(DIM).bg(POPUP_BG));
 
     f.render_widget(List::new(items).block(block).style(popup_style()), popup);
-}
-
-fn draw_move_picker(f: &mut Frame, app: &App, area: Rect) {
-    let targets: Vec<&str> = app
-        .contexts
-        .iter()
-        .filter(|c| c.slug != app.active_context.slug)
-        .map(|c| c.slug.as_str())
-        .collect();
-
-    let item_label = match app.move_source {
-        Some((Pane::Todos, idx)) => app.todos.get(idx).map(|t| t.title.as_str()).unwrap_or("?"),
-        Some((Pane::Notes, idx)) => app.notes.get(idx).map(|n| n.title.as_str()).unwrap_or("?"),
-        None => "?",
-    };
-
-    let popup = centered_rect(50, (targets.len() as u16 + 2).min(area.height), area);
-    f.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .style(popup_style())
-        .border_style(Style::default().fg(Color::Yellow).bg(POPUP_BG))
-        .title(Span::styled(
-            format!(" move \"{}\" to ", item_label),
-            Style::default().fg(Color::Yellow).bg(POPUP_BG).bold(),
-        ));
-
-    let items: Vec<ListItem> = targets
-        .iter()
-        .map(|slug| {
-            ListItem::new(Line::from(Span::styled(
-                format!("  {} ", slug),
-                popup_style(),
-            )))
-        })
-        .collect();
-
-    let list = List::new(items)
-        .block(block)
-        .style(popup_style())
-        .highlight_style(
-            Style::default()
-                .bg(Color::Yellow)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶ ");
-
-    let mut state = ListState::default();
-    state.select(Some(
-        app.move_picker_index.min(targets.len().saturating_sub(1)),
-    ));
-    f.render_stateful_widget(list, popup, &mut state);
-}
-
-fn draw_context_browser(f: &mut Frame, app: &App, area: Rect) {
-    let popup = centered_rect(50, (app.contexts.len() as u16 + 2).min(area.height), area);
-    f.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .style(popup_style())
-        .border_style(Style::default().fg(Color::Magenta).bg(POPUP_BG))
-        .title(Span::styled(
-            format!(" contexts ({}) ", app.contexts.len()),
-            Style::default().fg(Color::Magenta).bg(POPUP_BG).bold(),
-        ));
-
-    let items: Vec<ListItem> = app
-        .contexts
-        .iter()
-        .map(|ctx| {
-            let is_active = ctx.slug == app.active_context.slug;
-            let marker = if is_active { "* " } else { "  " };
-            let style = if is_active {
-                Style::default().fg(Color::Magenta).bg(POPUP_BG).bold()
-            } else {
-                popup_style()
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(marker, style),
-                Span::styled(ctx.slug.clone(), style),
-            ]))
-        })
-        .collect();
-
-    let list = List::new(items)
-        .block(block)
-        .style(popup_style())
-        .highlight_style(
-            Style::default()
-                .bg(Color::Magenta)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("▶ ");
-
-    let mut state = ListState::default();
-    state.select(Some(
-        app.context_index.min(app.contexts.len().saturating_sub(1)),
-    ));
-    f.render_stateful_widget(list, popup, &mut state);
 }
 
 fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {

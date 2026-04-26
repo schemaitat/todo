@@ -1,30 +1,23 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/todo-store",
-    "crates/todo-api-client",
+    "crates/todo-fs",
     "crates/todo-tui",
-    "crates/todo-mailer",
 ]
 
 [workspace.package]
 edition = "2021"
-version = "0.3.0"
+version = "0.4.0"
 
 [workspace.dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "1"
-uuid = { version = "1", features = ["v4", "serde"] }
-dirs = "5"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-url = "2"
 toml = "0.8"
-sha2 = "0.10"
-base64 = "0.22"
-open = "5"
+dirs = "5"
+ratatui = "0.29"
+crossterm = "0.28"
 
 [profile.release]
 lto = true

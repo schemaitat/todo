@@ -1,14 +1,11 @@
 use crate::editor::{EditorExit, VimEditor};
 use crate::ui;
-use anyhow::{anyhow, Result};
-use chrono::{DateTime, Utc};
+use anyhow::Result;
 use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{backend::Backend, Terminal};
 use std::time::Duration;
-use todo_api_client::{
-    auth, ApiError, AuthConfig, Client, Config, Context, Event as HistoryEvent, Note, PatchedNote,
-    PatchedTodo, Todo,
-};
+use todo_fs::store::Store;
+use todo_fs::types::{Note, Todo};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Pane {
@@ -26,9 +23,7 @@ pub enum Mode {
     TodoEdit,
     NoteView,
     NoteEdit,
-    History,
     ContextBrowser,
-    MovePicker,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -41,16 +36,15 @@ pub enum InputTarget {
 }
 
 pub struct App {
-    pub client: Client,
-    pub config: Config,
-    pub contexts: Vec<Context>,
-    pub active_context: Context,
+    pub store: Store,
+    pub contexts: Vec<String>,
     pub todos: Vec<Todo>,
     pub notes: Vec<Note>,
     pub focus: Pane,
     pub mode: Mode,
     pub todo_index: usize,
     pub note_index: usize,
+    pub context_index: usize,
     pub status: String,
     pub command_buffer: String,
     pub input_buffer: String,
@@ -58,65 +52,52 @@ pub struct App {
     pub filter: String,
     pub filter_backup: String,
     pub note_editor: Option<VimEditor>,
-    pub editing_note_index: Option<usize>,
-    pub editing_note_version: Option<DateTime<Utc>>,
+    pub editing_note_slug: Option<String>,
     pub todo_editor: Option<VimEditor>,
-    pub editing_todo_index: Option<usize>,
-    pub editing_todo_version: Option<DateTime<Utc>>,
-    pub history_events: Vec<HistoryEvent>,
-    pub history_scroll: usize,
+    pub editing_todo_slug: Option<String>,
     pub should_quit: bool,
     pub pending_d: bool,
     pub pending_g: bool,
     pub pending_c: bool,
-    pub offline: bool,
-    pub api_url: String,
-    pub context_index: usize,
     pub suggestions: Vec<String>,
     pub suggestion_index: usize,
-    pub move_source: Option<(Pane, usize)>,
-    pub move_picker_index: usize,
-    pub current_user: Option<String>,
-    needs_clear: bool,
 }
 
 impl App {
-    /// Build the app by fetching contexts and the active context's todos/notes from the API.
-    pub fn bootstrap(config: Config) -> Result<Self> {
-        let client = Client::new(config.clone()).map_err(|e| anyhow!("{}", e.status_line()))?;
-        let contexts = client.list_contexts()?;
-        if contexts.is_empty() {
-            return Err(anyhow!(
-                "no contexts on server — bootstrap the API first (it seeds an `inbox` context)"
-            ));
-        }
-        let active_slug = client.active_context_slug().to_string();
-        let active_context = contexts
+    pub fn bootstrap(store: Store) -> Result<Self> {
+        let contexts = store.list_contexts()?;
+        let (todos, mut warnings) = store.list_todos()?;
+        let (notes, note_warnings) = store.list_notes()?;
+        warnings.extend(note_warnings);
+
+        let status = if warnings.is_empty() {
+            format!(
+                "welcome — [{}]  :help for commands, :q to quit",
+                store.context()
+            )
+        } else {
+            format!(
+                "{} item(s) could not be loaded — check CONTENT.md files in [{}]",
+                warnings.len(),
+                store.context()
+            )
+        };
+
+        let context_index = contexts
             .iter()
-            .find(|c| c.slug == active_slug)
-            .cloned()
-            .unwrap_or_else(|| contexts[0].clone());
+            .position(|c| c == store.context())
+            .unwrap_or(0);
 
-        let todos = client.list_todos(&active_context.slug)?;
-        let notes = client.list_notes(&active_context.slug)?;
-        let current_user = client.get_me().ok().map(|u| u.email);
-
-        let status = format!(
-            "welcome — context [{}]  :help for commands, :q to quit",
-            active_context.slug
-        );
-        let api_url = client.base_url().trim_end_matches('/').to_string();
         let mut app = Self {
-            client,
-            config,
+            store,
             contexts,
-            active_context,
             todos,
             notes,
             focus: Pane::Todos,
             mode: Mode::Normal,
             todo_index: 0,
             note_index: 0,
+            context_index,
             status,
             command_buffer: String::new(),
             input_buffer: String::new(),
@@ -124,38 +105,22 @@ impl App {
             filter: String::new(),
             filter_backup: String::new(),
             note_editor: None,
-            editing_note_index: None,
-            editing_note_version: None,
+            editing_note_slug: None,
             todo_editor: None,
-            editing_todo_index: None,
-            editing_todo_version: None,
-            history_events: Vec::new(),
-            history_scroll: 0,
+            editing_todo_slug: None,
             should_quit: false,
             pending_d: false,
             pending_g: false,
             pending_c: false,
             suggestions: Vec::new(),
             suggestion_index: 0,
-            move_source: None,
-            move_picker_index: 0,
-            offline: false,
-            api_url,
-            context_index: 0,
-            current_user,
-            needs_clear: false,
         };
-        app.client.set_active_context(&app.active_context.slug);
         app.snap_selection();
         Ok(app)
     }
 
     pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<()> {
         loop {
-            if self.needs_clear {
-                terminal.clear()?;
-                self.needs_clear = false;
-            }
             terminal.draw(|f| ui::draw(f, self))?;
             if event::poll(Duration::from_millis(200))? {
                 if let CEvent::Key(key) = event::read()? {
@@ -181,9 +146,7 @@ impl App {
             Mode::TodoEdit => self.handle_todo_edit(key),
             Mode::NoteView => self.handle_note_view(key),
             Mode::NoteEdit => self.handle_note_edit(key),
-            Mode::History => self.handle_history(key),
             Mode::ContextBrowser => self.handle_context_browser(key),
-            Mode::MovePicker => self.handle_move_picker(key),
         }
     }
 
@@ -285,9 +248,6 @@ impl App {
                     Pane::Notes => Pane::Todos,
                 };
             }
-            KeyCode::Char('m') if key.modifiers == KeyModifiers::NONE => {
-                self.open_move_picker();
-            }
             KeyCode::Char('c') if key.modifiers == KeyModifiers::NONE => {
                 if pending_c {
                     self.cycle_context();
@@ -365,21 +325,13 @@ impl App {
         }
         let buf_lower = buf.to_lowercase();
 
-        let mut candidates: Vec<String> = vec![
-            "auth login",
-            "auth logout",
-            "auth status",
+        let mut candidates: Vec<String> = [
             "clear",
-            "context",
             "ctx",
-            "ctx delete",
             "ctx new",
             "delete",
             "h",
             "help",
-            "hist",
-            "history",
-            "log",
             "noh",
             "nofilter",
             "nohlsearch",
@@ -389,19 +341,18 @@ impl App {
             "quit",
             "reload",
             "rm",
-            "sync",
             "todo",
             "todos",
             "toggle",
             "wq",
             "x",
         ]
-        .into_iter()
-        .map(String::from)
+        .iter()
+        .map(|s| s.to_string())
         .collect();
 
         for ctx in &self.contexts {
-            candidates.push(format!("ctx {}", ctx.slug));
+            candidates.push(format!("ctx {}", ctx));
         }
 
         let mut result: Vec<String> = candidates
@@ -527,38 +478,29 @@ impl App {
                 return;
             }
         };
-        let idx = self.editing_todo_index.take();
-        let version = self.editing_todo_version.take();
-
+        let slug = self.editing_todo_slug.take();
         match exit {
             EditorExit::Save => {
-                let description = editor.body();
-                let Some(i) = idx else {
+                let body = editor.body();
+                let Some(slug) = slug else {
                     self.mode = Mode::Normal;
                     return;
                 };
-                let Some(todo) = self.todos.get(i) else {
+                let Some(idx) = self.todos.iter().position(|t| t.slug == slug) else {
                     self.mode = Mode::Normal;
                     return;
                 };
-                let id = todo.id;
-                if todo.description == description {
-                    self.status = String::from("todo description unchanged");
+                if self.todos[idx].body == body {
+                    self.status = String::from("todo body unchanged");
                     self.mode = Mode::Normal;
                     return;
                 }
-                let patch = PatchedTodo {
-                    description: Some(description),
-                    ..Default::default()
-                };
-                match self.client.patch_todo(id, &patch, version) {
+                match self.store.update_todo_body(&slug, &body) {
                     Ok(updated) => {
-                        if let Some(slot) = self.todos.get_mut(i) {
-                            *slot = updated;
-                        }
-                        self.status = String::from("todo description saved");
+                        self.todos[idx] = updated;
+                        self.status = String::from("todo saved");
                     }
-                    Err(e) => self.set_error_status(&e),
+                    Err(e) => self.status = format!("error: {e}"),
                 }
             }
             EditorExit::Cancel => {
@@ -576,38 +518,29 @@ impl App {
                 return;
             }
         };
-        let idx = self.editing_note_index.take();
-        let version = self.editing_note_version.take();
-
+        let slug = self.editing_note_slug.take();
         match exit {
             EditorExit::Save => {
                 let body = editor.body();
-                let Some(i) = idx else {
+                let Some(slug) = slug else {
                     self.mode = Mode::Normal;
                     return;
                 };
-                let Some(note) = self.notes.get(i) else {
+                let Some(idx) = self.notes.iter().position(|n| n.slug == slug) else {
                     self.mode = Mode::Normal;
                     return;
                 };
-                let id = note.id;
-                if note.body == body {
+                if self.notes[idx].body == body {
                     self.status = String::from("note unchanged");
                     self.mode = Mode::Normal;
                     return;
                 }
-                let patch = PatchedNote {
-                    body: Some(body),
-                    ..Default::default()
-                };
-                match self.client.patch_note(id, &patch, version) {
+                match self.store.update_note_body(&slug, &body) {
                     Ok(updated) => {
-                        if let Some(slot) = self.notes.get_mut(i) {
-                            *slot = updated;
-                        }
+                        self.notes[idx] = updated;
                         self.status = String::from("note saved");
                     }
-                    Err(e) => self.set_error_status(&e),
+                    Err(e) => self.status = format!("error: {e}"),
                 }
             }
             EditorExit::Cancel => {
@@ -625,7 +558,6 @@ impl App {
         let head = parts.next().unwrap_or("");
         let rest = parts.next().unwrap_or("").trim();
         match head {
-            "auth" => self.run_auth(rest),
             "q" | "quit" | "wq" | "x" => self.should_quit = true,
             "todo" | "todos" => {
                 self.focus = Pane::Todos;
@@ -653,9 +585,8 @@ impl App {
             }
             "delete" | "rm" => self.delete_current(),
             "toggle" => self.toggle_done(),
-            "history" | "hist" | "log" => self.open_history(),
+            "reload" | "sync" => self.reload(),
             "ctx" | "context" => self.run_ctx(rest),
-            "reload" | "sync" => self.reload_from_server(),
             "clear" | "nofilter" | "noh" | "nohlsearch" => {
                 self.filter.clear();
                 self.snap_selection();
@@ -663,125 +594,13 @@ impl App {
             }
             "help" | "h" => {
                 self.status = String::from(
-                    "keys: hjkl move/switch | i add | dd delete | x toggle | / filter | :ctx <slug> | :history",
+                    "keys: hjkl move/switch | i add | r rename | dd del | x done | e edit | / filter | cc cycle | C browser | :ctx new <name> | :q",
                 );
             }
             other => {
                 self.status = format!("unknown command: {}", other);
             }
         }
-    }
-
-    fn run_auth(&mut self, arg: &str) {
-        match arg {
-            "login" => self.do_oidc_login(),
-            "logout" => self.do_oidc_logout(),
-            "status" => {
-                self.status = match &self.current_user {
-                    Some(name) => format!("logged in as: {name}"),
-                    None => String::from("not logged in via OIDC (using API key)"),
-                };
-            }
-            _ => self.status = String::from("usage: :auth login | :auth logout | :auth status"),
-        }
-    }
-
-    fn reload_data(&mut self) -> bool {
-        let contexts = match self.client.list_contexts() {
-            Ok(c) if !c.is_empty() => c,
-            Ok(_) => {
-                self.status = String::from("no contexts returned by API");
-                return false;
-            }
-            Err(e) => {
-                self.status = format!("failed to reload contexts: {e}");
-                return false;
-            }
-        };
-        let active_slug = self.active_context.slug.clone();
-        let active_context = contexts
-            .iter()
-            .find(|c| c.slug == active_slug)
-            .cloned()
-            .unwrap_or_else(|| contexts[0].clone());
-        let todos = match self.client.list_todos(&active_context.slug) {
-            Ok(t) => t,
-            Err(e) => {
-                self.status = format!("failed to reload todos: {e}");
-                return false;
-            }
-        };
-        let notes = match self.client.list_notes(&active_context.slug) {
-            Ok(n) => n,
-            Err(e) => {
-                self.status = format!("failed to reload notes: {e}");
-                return false;
-            }
-        };
-        self.contexts = contexts;
-        self.active_context = active_context;
-        self.todos = todos;
-        self.notes = notes;
-        self.snap_selection();
-        true
-    }
-
-    fn do_oidc_login(&mut self) {
-        let oidc = match &self.config.oidc {
-            Some(o) => o.clone(),
-            None => {
-                self.status =
-                    String::from("OIDC not configured — set TODO_KEYCLOAK_URL in env or config");
-                return;
-            }
-        };
-        self.status = String::from("opening browser for login...");
-        self.needs_clear = true;
-        match auth::login_interactive(&oidc.keycloak_url, &oidc.realm, &oidc.client_id) {
-            Ok(tokens) => {
-                if let Err(e) = auth::save_tokens(&tokens) {
-                    self.status = format!("login ok but could not save tokens: {e}");
-                    return;
-                }
-                let new_config = Config {
-                    auth: AuthConfig::Bearer(tokens.access_token),
-                    ..self.config.clone()
-                };
-                match Client::new(new_config.clone()) {
-                    Ok(client) => {
-                        self.config = new_config;
-                        self.client = client;
-                        self.current_user = self.client.get_me().ok().map(|u| u.email);
-                        if self.reload_data() {
-                            self.status = match &self.current_user {
-                                Some(n) => format!("logged in as: {n}"),
-                                None => String::from("login successful"),
-                            };
-                        }
-                    }
-                    Err(e) => self.status = format!("login ok but client error: {e}"),
-                }
-            }
-            Err(e) => self.status = format!("login failed: {e}"),
-        }
-    }
-
-    fn do_oidc_logout(&mut self) {
-        if let Some(oidc) = &self.config.oidc {
-            auth::logout(&oidc.keycloak_url, &oidc.realm, &oidc.client_id);
-        } else {
-            auth::clear_tokens();
-        }
-        let new_config = Config {
-            auth: AuthConfig::OidcLoginRequired,
-            ..self.config.clone()
-        };
-        if let Ok(client) = Client::new(new_config.clone()) {
-            self.config = new_config;
-            self.client = client;
-        }
-        self.current_user = None;
-        self.status = String::from("logged out — run :auth login to sign in again");
     }
 
     fn run_ctx(&mut self, arg: &str) {
@@ -793,81 +612,136 @@ impl App {
         let first = parts.next().unwrap_or("");
         let rest = parts.next().unwrap_or("").trim();
         match first {
-            "new" => self.create_context(rest),
-            "delete" | "rm" => self.archive_context(rest),
-            _ => self.switch_context(first),
+            "new" => {
+                let name = rest.trim();
+                if name.is_empty() {
+                    self.start_input(InputTarget::NewContext);
+                } else {
+                    self.create_context(name);
+                }
+            }
+            slug => self.switch_context(slug),
         }
     }
 
-    fn create_context(&mut self, arg: &str) {
-        let mut parts = arg.splitn(2, char::is_whitespace);
-        let slug = parts.next().unwrap_or("").trim();
-        let name_raw = parts.next().unwrap_or("").trim();
-        if slug.is_empty() {
-            self.status = String::from("usage: :ctx new <slug> [name]");
-            return;
-        }
-        let name = if name_raw.is_empty() {
-            slug.to_string()
-        } else {
-            name_raw.to_string()
-        };
-        match self.client.create_context(slug, &name, None) {
-            Ok(ctx) => {
-                self.contexts.push(ctx.clone());
-                self.status = format!("created context [{}]", ctx.slug);
-                self.switch_context(&ctx.slug);
+    fn create_context(&mut self, name: &str) {
+        // Slugification happens inside store.create_context and store.switch_context.
+        match self.store.create_context(name) {
+            Ok(()) => {
+                self.switch_context(name);
             }
-            Err(e) => self.set_error_status(&e),
+            Err(e) => self.status = format!("error: {e}"),
         }
     }
 
     fn switch_context(&mut self, slug: &str) {
-        let Some(ctx) = self.contexts.iter().find(|c| c.slug == slug).cloned() else {
-            self.status = format!("no such context: {}", slug);
-            return;
-        };
-        let todos = self.client.list_todos(&ctx.slug);
-        let notes = self.client.list_notes(&ctx.slug);
-        match (todos, notes) {
-            (Ok(todos), Ok(notes)) => {
-                self.active_context = ctx.clone();
-                self.client.set_active_context(&ctx.slug);
+        match self.store.switch_context(slug) {
+            Ok((todos, notes, warnings)) => {
                 self.todos = todos;
                 self.notes = notes;
                 self.todo_index = 0;
                 self.note_index = 0;
                 self.filter.clear();
-                self.history_events.clear();
-                self.offline = false;
-                self.status = format!("switched to [{}]", ctx.slug);
+
+                // Use store.context() as the canonical slug after slugification.
+                let canonical = self.store.context().to_string();
+                if !self.contexts.contains(&canonical) {
+                    self.contexts.push(canonical.clone());
+                    self.contexts.sort();
+                }
+                self.context_index = self
+                    .contexts
+                    .iter()
+                    .position(|c| c == &canonical)
+                    .unwrap_or(0);
+
+                self.status = if warnings.is_empty() {
+                    format!("switched to [{}]", canonical)
+                } else {
+                    format!(
+                        "switched to [{}] — {} item(s) could not be loaded",
+                        canonical,
+                        warnings.len()
+                    )
+                };
             }
-            (Err(e), _) | (_, Err(e)) => self.set_error_status(&e),
+            Err(e) => self.status = format!("error: {e}"),
         }
     }
 
-    fn reload_from_server(&mut self) {
-        match self.client.list_contexts() {
-            Ok(contexts) => {
-                self.contexts = contexts;
+    fn cycle_context(&mut self) {
+        if self.contexts.len() < 2 {
+            self.status = String::from("only one context");
+            return;
+        }
+        let cur = self
+            .contexts
+            .iter()
+            .position(|c| c == self.store.context())
+            .unwrap_or(0);
+        let next_slug = self.contexts[(cur + 1) % self.contexts.len()].clone();
+        self.switch_context(&next_slug);
+    }
+
+    fn open_context_browser(&mut self) {
+        self.context_index = self
+            .contexts
+            .iter()
+            .position(|c| c == self.store.context())
+            .unwrap_or(0);
+        self.mode = Mode::ContextBrowser;
+    }
+
+    fn handle_context_browser(&mut self, key: KeyEvent) -> Result<()> {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.mode = Mode::Normal;
             }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if self.context_index + 1 < self.contexts.len() {
+                    self.context_index += 1;
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.context_index = self.context_index.saturating_sub(1);
+            }
+            KeyCode::Enter => {
+                if let Some(slug) = self.contexts.get(self.context_index).cloned() {
+                    self.mode = Mode::Normal;
+                    self.switch_context(&slug);
+                }
+            }
+            KeyCode::Char('n') => {
+                self.mode = Mode::Input;
+                self.input_buffer.clear();
+                self.input_target = Some(InputTarget::NewContext);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn reload(&mut self) {
+        match self.store.list_contexts() {
+            Ok(ctxs) => self.contexts = ctxs,
             Err(e) => {
-                self.set_error_status(&e);
+                self.status = format!("reload error: {e}");
                 return;
             }
         }
-        let slug = self.active_context.slug.clone();
-        let todos = self.client.list_todos(&slug);
-        let notes = self.client.list_notes(&slug);
-        match (todos, notes) {
-            (Ok(todos), Ok(notes)) => {
+        match (self.store.list_todos(), self.store.list_notes()) {
+            (Ok((todos, tw)), Ok((notes, nw))) => {
                 self.todos = todos;
                 self.notes = notes;
-                self.offline = false;
                 self.snap_selection();
-                self.status = String::from("reloaded");
+                let total_warnings = tw.len() + nw.len();
+                self.status = if total_warnings == 0 {
+                    String::from("reloaded")
+                } else {
+                    format!("reloaded — {total_warnings} item(s) could not be parsed")
+                };
             }
-            (Err(e), _) | (_, Err(e)) => self.set_error_status(&e),
+            (Err(e), _) | (_, Err(e)) => self.status = format!("reload error: {e}"),
         }
     }
 
@@ -878,71 +752,52 @@ impl App {
             return;
         }
         match target {
-            InputTarget::NewTodo => {
-                match self.client.create_todo(&self.active_context.slug, &value) {
-                    Ok(todo) => {
-                        self.todos.push(todo);
-                        self.todo_index = self.todos.len().saturating_sub(1);
-                        self.focus = Pane::Todos;
-                        self.status = String::from("todo added");
-                    }
-                    Err(e) => self.set_error_status(&e),
+            InputTarget::NewTodo => match self.store.create_todo(&value) {
+                Ok(todo) => {
+                    self.todos.push(todo);
+                    self.todo_index = self.todos.len().saturating_sub(1);
+                    self.focus = Pane::Todos;
+                    self.status = String::from("todo added");
                 }
-            }
-            InputTarget::NewNote => {
-                match self.client.create_note(&self.active_context.slug, &value) {
-                    Ok(note) => {
-                        self.notes.push(note);
-                        self.note_index = self.notes.len().saturating_sub(1);
-                        self.focus = Pane::Notes;
-                        self.status = String::from("note added");
-                    }
-                    Err(e) => self.set_error_status(&e),
+                Err(e) => self.status = format!("error: {e}"),
+            },
+            InputTarget::NewNote => match self.store.create_note(&value) {
+                Ok(note) => {
+                    self.notes.push(note);
+                    self.note_index = self.notes.len().saturating_sub(1);
+                    self.focus = Pane::Notes;
+                    self.status = String::from("note added");
                 }
-            }
+                Err(e) => self.status = format!("error: {e}"),
+            },
             InputTarget::RenameTodo => {
-                let Some(id) = self.todos.get(self.todo_index).map(|t| t.id) else {
+                let Some(slug) = self.todos.get(self.todo_index).map(|t| t.slug.clone()) else {
                     return;
                 };
-                match self.client.rename_todo(id, &value) {
+                let idx = self.todo_index;
+                match self.store.rename_todo(&slug, &value) {
                     Ok(updated) => {
-                        if let Some(slot) = self.todos.get_mut(self.todo_index) {
-                            *slot = updated;
-                        }
+                        self.todos[idx] = updated;
                         self.status = String::from("todo renamed");
                     }
-                    Err(e) => self.set_error_status(&e),
+                    Err(e) => self.status = format!("error: {e}"),
                 }
             }
             InputTarget::RenameNote => {
-                let Some(id) = self.notes.get(self.note_index).map(|n| n.id) else {
+                let Some(slug) = self.notes.get(self.note_index).map(|n| n.slug.clone()) else {
                     return;
                 };
-                match self.client.rename_note(id, &value) {
+                let idx = self.note_index;
+                match self.store.rename_note(&slug, &value) {
                     Ok(updated) => {
-                        if let Some(slot) = self.notes.get_mut(self.note_index) {
-                            *slot = updated;
-                        }
+                        self.notes[idx] = updated;
                         self.status = String::from("note renamed");
                     }
-                    Err(e) => self.set_error_status(&e),
+                    Err(e) => self.status = format!("error: {e}"),
                 }
             }
             InputTarget::NewContext => {
-                let slug = value.trim().to_string();
-                if slug.is_empty() {
-                    self.status = String::from("cancelled (empty)");
-                    return;
-                }
-                match self.client.create_context(&slug, &slug, None) {
-                    Ok(ctx) => {
-                        self.contexts.push(ctx.clone());
-                        self.status = format!("created context [{}]", ctx.slug);
-                        self.switch_context(&ctx.slug);
-                        self.open_context_browser();
-                    }
-                    Err(e) => self.set_error_status(&e),
-                }
+                self.create_context(&value);
             }
         }
     }
@@ -961,45 +816,48 @@ impl App {
     fn delete_current(&mut self) {
         match self.focus {
             Pane::Todos => {
-                let Some(id) = self.todos.get(self.todo_index).map(|t| t.id) else {
+                let Some(slug) = self.todos.get(self.todo_index).map(|t| t.slug.clone()) else {
                     return;
                 };
-                match self.client.delete_todo(id) {
+                match self.store.delete_todo(&slug) {
                     Ok(()) => {
                         self.todos.remove(self.todo_index);
                         self.snap_selection();
                         self.status = String::from("todo deleted");
                     }
-                    Err(e) => self.set_error_status(&e),
+                    Err(e) => self.status = format!("error: {e}"),
                 }
             }
             Pane::Notes => {
-                let Some(id) = self.notes.get(self.note_index).map(|n| n.id) else {
+                let Some(slug) = self.notes.get(self.note_index).map(|n| n.slug.clone()) else {
                     return;
                 };
-                match self.client.delete_note(id) {
+                match self.store.delete_note(&slug) {
                     Ok(()) => {
                         self.notes.remove(self.note_index);
                         self.snap_selection();
                         self.status = String::from("note deleted");
                     }
-                    Err(e) => self.set_error_status(&e),
+                    Err(e) => self.status = format!("error: {e}"),
                 }
             }
         }
     }
 
     fn toggle_done(&mut self) {
-        let Some((id, next)) = self.todos.get(self.todo_index).map(|t| (t.id, !t.done)) else {
+        let Some((slug, next)) = self
+            .todos
+            .get(self.todo_index)
+            .map(|t| (t.slug.clone(), !t.done))
+        else {
             return;
         };
-        match self.client.set_todo_done(id, next) {
+        let idx = self.todo_index;
+        match self.store.set_todo_done(&slug, next) {
             Ok(updated) => {
-                if let Some(slot) = self.todos.get_mut(self.todo_index) {
-                    *slot = updated;
-                }
+                self.todos[idx] = updated;
             }
-            Err(e) => self.set_error_status(&e),
+            Err(e) => self.status = format!("error: {e}"),
         }
     }
 
@@ -1012,8 +870,7 @@ impl App {
     fn open_note_edit(&mut self) {
         if let Some(note) = self.notes.get(self.note_index) {
             self.note_editor = Some(VimEditor::new(&note.body));
-            self.editing_note_index = Some(self.note_index);
-            self.editing_note_version = Some(note.updated_at);
+            self.editing_note_slug = Some(note.slug.clone());
             self.mode = Mode::NoteEdit;
             self.status = String::from("editing note — :w save  :q cancel  i insert  Esc normal");
         }
@@ -1027,12 +884,10 @@ impl App {
 
     fn open_todo_edit(&mut self) {
         if let Some(todo) = self.todos.get(self.todo_index) {
-            self.todo_editor = Some(VimEditor::new(&todo.description));
-            self.editing_todo_index = Some(self.todo_index);
-            self.editing_todo_version = Some(todo.updated_at);
+            self.todo_editor = Some(VimEditor::new(&todo.body));
+            self.editing_todo_slug = Some(todo.slug.clone());
             self.mode = Mode::TodoEdit;
-            self.status =
-                String::from("editing todo description — :w save  :q cancel  i insert  Esc normal");
+            self.status = String::from("editing todo — :w save  :q cancel  i insert  Esc normal");
         }
     }
 
@@ -1066,11 +921,11 @@ impl App {
         self.todos
             .iter()
             .enumerate()
-            .filter(|(_, t)| t.deleted_at.is_none())
             .filter(|(_, t)| {
                 f.is_empty()
                     || t.title.to_lowercase().contains(&f)
                     || t.description.to_lowercase().contains(&f)
+                    || t.body.to_lowercase().contains(&f)
             })
             .map(|(i, _)| i)
             .collect()
@@ -1081,10 +936,10 @@ impl App {
         self.notes
             .iter()
             .enumerate()
-            .filter(|(_, n)| n.deleted_at.is_none())
             .filter(|(_, n)| {
                 f.is_empty()
                     || n.title.to_lowercase().contains(&f)
+                    || n.description.to_lowercase().contains(&f)
                     || n.body.to_lowercase().contains(&f)
             })
             .map(|(i, _)| i)
@@ -1106,231 +961,6 @@ impl App {
         let note_visible = self.visible_note_indices();
         if !note_visible.contains(&self.note_index) {
             self.note_index = note_visible.first().copied().unwrap_or(0);
-        }
-    }
-
-    fn set_error_status(&mut self, e: &ApiError) {
-        if e.is_network() {
-            self.offline = true;
-        }
-        self.status = e.status_line();
-    }
-
-    fn cycle_context(&mut self) {
-        if self.contexts.len() < 2 {
-            self.status = String::from("only one context");
-            return;
-        }
-        let cur = self
-            .contexts
-            .iter()
-            .position(|c| c.slug == self.active_context.slug)
-            .unwrap_or(0);
-        let next = (cur + 1) % self.contexts.len();
-        let slug = self.contexts[next].slug.clone();
-        self.switch_context(&slug);
-    }
-
-    fn open_context_browser(&mut self) {
-        self.context_index = self
-            .contexts
-            .iter()
-            .position(|c| c.slug == self.active_context.slug)
-            .unwrap_or(0);
-        self.mode = Mode::ContextBrowser;
-    }
-
-    fn handle_context_browser(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.mode = Mode::Normal;
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.context_index + 1 < self.contexts.len() {
-                    self.context_index += 1;
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.context_index = self.context_index.saturating_sub(1);
-            }
-            KeyCode::Enter => {
-                if let Some(ctx) = self.contexts.get(self.context_index).cloned() {
-                    let slug = ctx.slug.clone();
-                    self.mode = Mode::Normal;
-                    self.switch_context(&slug);
-                }
-            }
-            KeyCode::Char('n') => {
-                self.mode = Mode::Input;
-                self.input_buffer.clear();
-                self.input_target = Some(InputTarget::NewContext);
-            }
-            KeyCode::Char('d') => {
-                if let Some(ctx) = self.contexts.get(self.context_index).cloned() {
-                    if ctx.slug == self.active_context.slug {
-                        self.status = String::from("cannot delete the active context");
-                    } else {
-                        let slug = ctx.slug.clone();
-                        self.archive_context(&slug);
-                        self.context_index = self
-                            .context_index
-                            .min(self.contexts.len().saturating_sub(1));
-                    }
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn archive_context(&mut self, slug: &str) {
-        if slug.is_empty() {
-            self.status = String::from("usage: :ctx delete <slug>");
-            return;
-        }
-        if slug == self.active_context.slug {
-            self.status = String::from("cannot delete the active context");
-            return;
-        }
-        match self.client.archive_context(slug) {
-            Ok(()) => {
-                self.contexts.retain(|c| c.slug != slug);
-                self.status = format!("deleted context [{}]", slug);
-            }
-            Err(e) => self.set_error_status(&e),
-        }
-    }
-
-    fn open_move_picker(&mut self) {
-        let other_contexts: Vec<_> = self
-            .contexts
-            .iter()
-            .filter(|c| c.slug != self.active_context.slug)
-            .collect();
-        if other_contexts.is_empty() {
-            self.status = String::from("no other contexts to move to");
-            return;
-        }
-        self.move_source = Some((self.focus, self.current_index()));
-        self.move_picker_index = 0;
-        self.mode = Mode::MovePicker;
-    }
-
-    fn handle_move_picker(&mut self, key: KeyEvent) -> Result<()> {
-        let targets: Vec<String> = self
-            .contexts
-            .iter()
-            .filter(|c| c.slug != self.active_context.slug)
-            .map(|c| c.slug.clone())
-            .collect();
-
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.mode = Mode::Normal;
-                self.move_source = None;
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.move_picker_index + 1 < targets.len() {
-                    self.move_picker_index += 1;
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.move_picker_index = self.move_picker_index.saturating_sub(1);
-            }
-            KeyCode::Enter => {
-                if let Some(slug) = targets.get(self.move_picker_index).cloned() {
-                    self.execute_move(&slug);
-                }
-                self.mode = Mode::Normal;
-                self.move_source = None;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn execute_move(&mut self, target_slug: &str) {
-        let Some((pane, idx)) = self.move_source else {
-            return;
-        };
-        let active_ctx_id = self.active_context.id;
-        match pane {
-            Pane::Todos => {
-                let Some(id) = self.todos.get(idx).map(|t| t.id) else {
-                    return;
-                };
-                let title = self.todos[idx].title.clone();
-                match self.client.move_todo(id, target_slug) {
-                    Ok(updated) if updated.context_id != active_ctx_id => {
-                        self.todos.remove(idx);
-                        self.snap_selection();
-                        self.status = format!("moved \"{}\" to [{}]", title, target_slug);
-                    }
-                    Ok(_) => {
-                        self.status =
-                            String::from("move failed: server did not accept context change");
-                    }
-                    Err(e) => self.set_error_status(&e),
-                }
-            }
-            Pane::Notes => {
-                let Some(id) = self.notes.get(idx).map(|n| n.id) else {
-                    return;
-                };
-                let title = self.notes[idx].title.clone();
-                match self.client.move_note(id, target_slug) {
-                    Ok(updated) if updated.context_id != active_ctx_id => {
-                        self.notes.remove(idx);
-                        self.snap_selection();
-                        self.status = format!("moved \"{}\" to [{}]", title, target_slug);
-                    }
-                    Ok(_) => {
-                        self.status =
-                            String::from("move failed: server did not accept context change");
-                    }
-                    Err(e) => self.set_error_status(&e),
-                }
-            }
-        }
-    }
-
-    fn handle_history(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                self.mode = Mode::Normal;
-                self.history_events.clear();
-                self.history_scroll = 0;
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                if self.history_scroll + 1 < self.history_events.len() {
-                    self.history_scroll += 1;
-                }
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.history_scroll = self.history_scroll.saturating_sub(1);
-            }
-            KeyCode::Char('g') => {
-                self.history_scroll = 0;
-            }
-            KeyCode::Char('G') => {
-                self.history_scroll = self.history_events.len().saturating_sub(1);
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn open_history(&mut self) {
-        match self
-            .client
-            .list_events(Some(&self.active_context.slug), 200)
-        {
-            Ok(events) => {
-                self.history_events = events;
-                self.history_scroll = 0;
-                self.mode = Mode::History;
-            }
-            Err(e) => self.set_error_status(&e),
         }
     }
 }
