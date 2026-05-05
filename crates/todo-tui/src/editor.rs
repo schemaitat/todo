@@ -39,6 +39,7 @@ pub struct VimEditor {
     register_linewise: bool,
     undo: Vec<Snap>,
     redo: Vec<Snap>,
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl VimEditor {
@@ -64,6 +65,7 @@ impl VimEditor {
             register_linewise: false,
             undo: Vec::new(),
             redo: Vec::new(),
+            clipboard: arboard::Clipboard::new().ok(),
         }
     }
 
@@ -192,6 +194,9 @@ impl VimEditor {
             (KeyCode::Char('G'), false) => {
                 self.row = self.lines.len().saturating_sub(1);
                 self.col = 0;
+            }
+            (KeyCode::Char('Y'), false) => {
+                self.yank_all();
             }
             (KeyCode::Char('g'), false) => self.pending = Some('g'),
             (KeyCode::Char('d'), false) => self.pending = Some('d'),
@@ -858,6 +863,34 @@ impl VimEditor {
         let line = self.lines.get(self.row).cloned().unwrap_or_default();
         self.register = format!("{}\n", line);
         self.register_linewise = true;
+    }
+
+    fn yank_all(&mut self) {
+        self.register = self.lines.join("\n");
+        if !self.register.is_empty() {
+            self.register.push('\n');
+        }
+        self.register_linewise = true;
+
+        let content = self.register.trim_end_matches('\n').to_string();
+        match self.clipboard.as_mut() {
+            Some(cb) => match cb.set_text(content) {
+                Ok(()) => {
+                    let n = self.lines.len();
+                    self.status = format!(
+                        "{} line{} copied to clipboard",
+                        n,
+                        if n == 1 { "" } else { "s" }
+                    );
+                }
+                Err(e) => {
+                    self.status = format!("clipboard error: {}", e);
+                }
+            },
+            None => {
+                self.status = "clipboard unavailable".to_string();
+            }
+        }
     }
 
     fn replace_char(&mut self, c: char) {
